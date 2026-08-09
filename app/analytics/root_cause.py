@@ -100,9 +100,7 @@ def run_root_cause(
         g = closed.groupby(list(dset))["late"].agg(n="size", rate="mean")
         for key, r in g.iterrows():
             key = key if isinstance(key, tuple) else (key,)
-            n_val = int(r["n"].item() if hasattr(r["n"], "item") else r["n"])
-            rate_val = float(r["rate"].item() if hasattr(r["rate"], "item") else r["rate"])
-            rows.append({"dims": dset, "key": key, "n": n_val, "rate": rate_val})
+            rows.append({"dims": dset, "key": key, "n": int(r["n"]), "rate": float(r["rate"])})
     cand = pd.DataFrame(rows)
     candidates_enumerated = len(cand)
 
@@ -145,17 +143,11 @@ def run_root_cause(
         base_keys.append(bk)
     cand["base"] = bases
     cand["base_key"] = base_keys
-
-    # Protect against zero baselines causing division by zero in lift/confound logic.
-    safe_base = cand["base"].mask(cand["base"] == 0, np.nan)
-    cand["lift"] = cand["rate"] / safe_base
+    cand["lift"] = cand["rate"] / cand["base"]
     cand["excess"] = cand["n"] * (cand["rate"] - cand["base"])
 
     # --- Gate 3 stats computed for all (needed for FDR over M) ---
-    se = pd.Series(
-        np.sqrt(cand["base"] * (1 - cand["base"]) / cand["n"]),
-        index=cand.index,
-    ).mask(lambda s: s == 0, np.nan)
+    se = np.sqrt(cand["base"] * (1 - cand["base"]) / cand["n"])
     cand["z"] = (cand["rate"] - cand["base"]) / se
     cand["p"] = 2 * (1 - stats.norm.cdf(cand["z"].abs()))
 
@@ -180,14 +172,22 @@ def run_root_cause(
     # --- Gate 4: confound / all-parents ---
     def confound_ok(dset: tuple[str, ...], key: tuple, r: float) -> bool:
         if len(dset) == 1:
-            if G == 0 or np.isnan(G):
-                return False
             return abs(r / G - 1) >= params.confound_margin
         for drop in dset:
             pdm = tuple(x for x in dset if x != drop)
             pk = tuple(key[i] for i, x in enumerate(dset) if x != drop)
             br = rate_of(pdm, pk)
-            if br == 0 or np.isnan(br) or abs(r / br - 1) < params.confound_margin:
+            # Guard: a parent with a zero (or NaN) late rate can't be divided
+            # into. Treat it as a lift measured against a tiny epsilon so the
+            # comparison stays well-defined instead of crashing.
+            if np.isnan(br):
+                return False
+            if br == 0:
+                # segment rate r against a 0% parent: if r>0 it's clearly worse,
+                # otherwise both zero -> no effect.
+                if r <= 0:
+                    return False
+            elif abs(r / br - 1) < params.confound_margin:
                 return False
             if np.sign(r - br) != np.sign(r - G):
                 return False
@@ -212,15 +212,13 @@ def run_root_cause(
         halves = {}
         for h, gg in s.groupby("_half"):
             if len(gg) >= 50:
-                h_key = int(float(h))
-                halves[h_key] = float(gg["late"].mean()) - base
-        if 0 not in halves or 1 not in halves:
+                halves[int(h)] = float(gg["late"].mean()) - base
+        if len(halves) < 2:
             return 0.25, False, "no_history_in_one_half"
-        d0 = halves[0]
-        d1 = halves[1]
+        d0, d1 = halves.get(0), halves.get(1)
         if np.sign(d0) != np.sign(d1):
             return 0.0, False, "sign_flip"
-        var = abs(d0 - d1) / max(abs((d0 + d1) / 2), 1e-9)
+        var = abs(d0 - d1) / max(abs(np.mean([d0, d1])), 1e-9)
         ok = var < params.stability_var_max
         return max(0.0, 1 - var), ok, ("stable" if ok else "too_variable")
 

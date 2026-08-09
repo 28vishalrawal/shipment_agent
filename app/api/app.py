@@ -7,6 +7,7 @@ from fastapi import FastAPI, Request, Response
 
 from app.api.routes.main_routes import router
 from app.api.routes.agentic_routes import router as agentic_router
+from app.api.routes.rootcause_routes import router as rootcause_router
 from app.core.config import get_settings
 from app.observability.logging_setup import configure_logging
 from app.observability import metrics
@@ -18,6 +19,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title=s.service_name, version=s.build_version)
     app.include_router(router)
     app.include_router(agentic_router)
+    app.include_router(rootcause_router)
 
     @app.middleware("http")
     async def timing(request: Request, call_next):

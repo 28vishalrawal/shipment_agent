@@ -94,7 +94,8 @@ class NotificationAgent:
         except ProviderError as exc:
             log_event(logger, "llm_request_failed", status="error",
                       correlation_id=correlation_id, agent_name="notification",
-                      error_code=type(exc).__name__)
+                      error_code=type(exc).__name__,
+                      error_detail=str(exc)[:300])
             return self._fallback(record, product, quantity, tier, "llm_failed")
 
         check = check_notification(
