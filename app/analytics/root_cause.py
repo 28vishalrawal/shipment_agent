@@ -100,7 +100,9 @@ def run_root_cause(
         g = closed.groupby(list(dset))["late"].agg(n="size", rate="mean")
         for key, r in g.iterrows():
             key = key if isinstance(key, tuple) else (key,)
-            rows.append({"dims": dset, "key": key, "n": int(r["n"]), "rate": float(r["rate"])})
+            n_val = int(r["n"].item() if hasattr(r["n"], "item") else r["n"])
+            rate_val = float(r["rate"].item() if hasattr(r["rate"], "item") else r["rate"])
+            rows.append({"dims": dset, "key": key, "n": n_val, "rate": rate_val})
     cand = pd.DataFrame(rows)
     candidates_enumerated = len(cand)
 
@@ -145,12 +147,15 @@ def run_root_cause(
     cand["base_key"] = base_keys
 
     # Protect against zero baselines causing division by zero in lift/confound logic.
-    safe_base = cand["base"].replace(0, np.nan)
+    safe_base = cand["base"].mask(cand["base"] == 0, np.nan)
     cand["lift"] = cand["rate"] / safe_base
     cand["excess"] = cand["n"] * (cand["rate"] - cand["base"])
 
     # --- Gate 3 stats computed for all (needed for FDR over M) ---
-    se = np.sqrt(cand["base"] * (1 - cand["base"]) / cand["n"]).replace(0, np.nan)
+    se = pd.Series(
+        np.sqrt(cand["base"] * (1 - cand["base"]) / cand["n"]),
+        index=cand.index,
+    ).mask(lambda s: s == 0, np.nan)
     cand["z"] = (cand["rate"] - cand["base"]) / se
     cand["p"] = 2 * (1 - stats.norm.cdf(cand["z"].abs()))
 
@@ -207,13 +212,15 @@ def run_root_cause(
         halves = {}
         for h, gg in s.groupby("_half"):
             if len(gg) >= 50:
-                halves[int(h)] = float(gg["late"].mean()) - base
-        if len(halves) < 2:
+                h_key = int(float(h))
+                halves[h_key] = float(gg["late"].mean()) - base
+        if 0 not in halves or 1 not in halves:
             return 0.25, False, "no_history_in_one_half"
-        d0, d1 = halves.get(0), halves.get(1)
+        d0 = halves[0]
+        d1 = halves[1]
         if np.sign(d0) != np.sign(d1):
             return 0.0, False, "sign_flip"
-        var = abs(d0 - d1) / max(abs(np.mean([d0, d1])), 1e-9)
+        var = abs(d0 - d1) / max(abs((d0 + d1) / 2), 1e-9)
         ok = var < params.stability_var_max
         return max(0.0, 1 - var), ok, ("stable" if ok else "too_variable")
 
