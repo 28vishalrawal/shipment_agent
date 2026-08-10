@@ -73,23 +73,68 @@ class Orchestrator:
                 for _, r in ingested.open_orders.iterrows()
             }
 
+        # ---- Template pooling: draft ONE message per distinct template shape,
+        # then fill every other order in that shape deterministically. Turns N
+        # late orders into (distinct shapes) LLM calls — typically < 50 even for
+        # millions of orders. Each customer still gets their own id/product/date.
+        from app.agents.notification_agent import fill_template_for_order, _tier as _note_tier
+
+        def _product_of(rec: TriageRecord) -> str:
+            row = by_id.get(rec.order_id, {})
+            return str(row.get("product_name", row.get(cm.CATEGORY, "your item")))
+
+        def _quantity_of(rec: TriageRecord) -> str:
+            row = by_id.get(rec.order_id, {})
+            return str(row.get("quantity", "")).strip()
+
+        # Group triage records by template key.
+        groups: dict[str, list[TriageRecord]] = {}
+        for rec in triage:
+            groups.setdefault(self._notifier.template_key(rec), []).append(rec)
+
+        log_event(logger, "notification_pooling", run_id=run_id,
+                  correlation_id=correlation_id, orders=len(triage),
+                  distinct_templates=len(groups))
+
         notifications: list[NotificationRecord] = []
-        # Bounded concurrency to avoid hammering the provider.
         sem = asyncio.Semaphore(10)
 
-        async def one(rec: TriageRecord):
+        async def draft_group(key: str, recs: list[TriageRecord]):
+            representative = recs[0]
+            rep_product = _product_of(representative)
             async with sem:
                 try:
-                    return await self._notifier.draft(
-                        rec, by_id.get(rec.order_id, {}), correlation_id
+                    rep_note = await self._notifier.draft(
+                        representative, by_id.get(representative.order_id, {}), correlation_id
                     )
-                except Exception as exc:  # per-order isolation
+                except Exception as exc:
                     log_event(logger, "customer_notification_generated", status="error",
                               correlation_id=correlation_id, error_code=type(exc).__name__)
-                    return None
+                    return []
+            out = [rep_note]
+            # Fill the remaining orders in this group from the representative's
+            # message shape — deterministic, no further LLM calls.
+            if rep_note.used_fallback:
+                # Provider down / guardrail fallback: each order gets its own
+                # personalized fallback template directly.
+                for rec in recs[1:]:
+                    out.append(self._notifier._fallback(
+                        rec, _product_of(rec), _quantity_of(rec),
+                        _note_tier(rec), "pooled_fallback",
+                    ))
+            else:
+                for rec in recs[1:]:
+                    out.append(fill_template_for_order(
+                        rep_note.subject, rep_note.body, representative, rep_product,
+                        rec, _product_of(rec), _quantity_of(rec),
+                    ))
+            return out
 
-        results = await asyncio.gather(*(one(r) for r in triage))
-        notifications = [n for n in results if n is not None]
+        group_results = await asyncio.gather(
+            *(draft_group(k, v) for k, v in groups.items())
+        )
+        for g in group_results:
+            notifications.extend(g)
         return triage, notifications
 
     # ---------------- Lane B ----------------

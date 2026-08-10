@@ -62,13 +62,13 @@ def check_notification(
             except ValueError:
                 pass
 
-    # Grounding: at least `min_grounded` supplied field values appear verbatim.
-    present = 0
-    for key, val in grounded_fields.items():
-        if val and str(val).strip() and str(val) in text:
-            present += 1
-    if present < min_grounded:
-        reasons.append(f"insufficient_grounding:{present}<{min_grounded}")
+    # Grounding: require min_grounded field values verbatim, but never demand
+    # more than the number of non-empty fields actually supplied.
+    available = [v for v in grounded_fields.values() if v and str(v).strip()]
+    required = min(min_grounded, len(available))
+    present = sum(1 for val in available if str(val) in text)
+    if present < required:
+        reasons.append(f"insufficient_grounding:{present}<{required}")
 
     return OutputCheck(ok=len(reasons) == 0, reasons=reasons)
 
