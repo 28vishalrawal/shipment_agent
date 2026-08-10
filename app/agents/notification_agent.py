@@ -92,10 +92,19 @@ class NotificationAgent:
                 estimated_cost_usd=result.usage.estimated_cost_usd, retry_count=retries,
             )
         except ProviderError as exc:
-            log_event(logger, "llm_request_failed", status="error",
-                      correlation_id=correlation_id, agent_name="notification",
-                      error_code=type(exc).__name__,
-                      error_detail=str(exc)[:300])
+            log_event(
+                logger,
+                "llm_request_failed",
+                status="error",
+                correlation_id=correlation_id,
+                agent_name="notification",
+                error_code=type(exc).__name__,
+                error_message=str(exc)[:500],
+                status_code=getattr(exc, "status_code", None),
+                provider_name=getattr(self._provider, "name", "unknown"),
+                model_name=getattr(self._provider, "model", "unknown"),
+                prompt_version=notification_v1.PROMPT_VERSION,
+            )
             return self._fallback(record, product, quantity, tier, "llm_failed")
 
         check = check_notification(

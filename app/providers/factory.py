@@ -7,7 +7,7 @@ MockProvider makes the whole system testable with zero network + zero keys.
 from __future__ import annotations
 
 import json
-from typing import Type, TypeVar
+from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
 
@@ -20,6 +20,21 @@ from app.providers.base import (
 )
 
 T = TypeVar("T", bound=BaseModel)
+
+
+def _extract_status_code(exc: Exception) -> int | None:
+    response = getattr(exc, "response", None)
+    status_code = getattr(response, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    status_code = getattr(exc, "status_code", None)
+    if isinstance(status_code, int):
+        return status_code
+    return None
+
+
+def _provider_error(exc: Exception) -> ProviderError:
+    return ProviderError(str(exc), status_code=_extract_status_code(exc))
 
 # Rough per-1K-token prices (USD) for cost estimation only. Update as needed.
 _PRICES = {
@@ -62,7 +77,8 @@ class OpenAIProvider:
                 ],
             )
         except Exception as exc:  # normalise every SDK error
-            raise ProviderError(str(exc)) from exc
+            # Keep the error message available to callers/logs.
+            raise _provider_error(exc) from exc
         u = resp.usage
         usage = LLMUsage(
             prompt_tokens=getattr(u, "prompt_tokens", 0),
@@ -102,7 +118,7 @@ class OpenAIProvider:
                 ],
             )
         except Exception as exc:
-            raise ProviderError(str(exc)) from exc
+            raise _provider_error(exc) from exc
         content = resp.choices[0].message.content or "{}"
         u = resp.usage
         usage = LLMUsage(
@@ -142,7 +158,7 @@ class OpenAIProvider:
                 messages=messages,
             )
         except Exception as exc:
-            raise ProviderError(str(exc)) from exc
+            raise _provider_error(exc) from exc
         msg = resp.choices[0].message
         calls: list[ToolCall] = []
         for tc in (msg.tool_calls or []):

@@ -63,6 +63,19 @@ class MitigationAgent:
             finding.expected_effect = out.expected_effect
         except ProviderError as exc:
             # Deterministic fallback narrative: purely descriptive, no invented cause.
+            log_event(
+                logger,
+                "llm_request_failed",
+                status="error",
+                correlation_id=correlation_id,
+                agent_name="mitigation",
+                error_code=type(exc).__name__,
+                error_message=str(exc)[:500],
+                status_code=getattr(exc, "status_code", None),
+                provider_name=getattr(self._provider, "name", "unknown"),
+                model_name=getattr(self._provider, "model", "unknown"),
+                prompt_version=mitigation_v1.PROMPT_VERSION,
+            )
             log_event(logger, "fallback_response_used", status="ok",
                       correlation_id=correlation_id, agent_name="mitigation",
                       error_code=type(exc).__name__)
