@@ -86,7 +86,7 @@ def run_root_cause(
         g = group(dset)
         k = key if len(dset) > 1 else key[0]
         if k in g.index:
-            return float(g.loc[k, "mean"])
+            return float(np.asarray(g.loc[k, "mean"]).item())
         return float("nan")
 
     # --- enumerate candidates: 1-, 2-way over all dims; 3-way containing mode ---
@@ -215,10 +215,12 @@ def run_root_cause(
                 halves[int(h)] = float(gg["late"].mean()) - base
         if len(halves) < 2:
             return 0.25, False, "no_history_in_one_half"
-        d0, d1 = halves.get(0), halves.get(1)
+        # Take the two present deltas directly (values are floats, never None).
+        deltas = list(halves.values())
+        d0, d1 = float(deltas[0]), float(deltas[1])
         if np.sign(d0) != np.sign(d1):
             return 0.0, False, "sign_flip"
-        var = abs(d0 - d1) / max(abs(np.mean([d0, d1])), 1e-9)
+        var = abs(d0 - d1) / max(abs((d0 + d1) / 2.0), 1e-9)
         ok = var < params.stability_var_max
         return max(0.0, 1 - var), ok, ("stable" if ok else "too_variable")
 

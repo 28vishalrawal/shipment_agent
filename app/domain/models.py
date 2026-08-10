@@ -118,6 +118,14 @@ class EscalationDecision(BaseModel):
     confidence: float
     threshold: float
     suppression_reason: Optional[str] = None
+    # Inline explanation of the escalated finding so the escalation is
+    # self-contained (no need to cross-reference the findings array).
+    finding_label: Optional[str] = None
+    excess_orders: Optional[float] = None
+    excess_margin_usd: Optional[float] = None
+    narrative: Optional[str] = None
+    mitigation: Optional[str] = None
+    expected_effect: Optional[str] = None
 
 
 class RootCauseReport(BaseModel):

@@ -164,20 +164,30 @@ class Orchestrator:
         for f in out.findings:
             await self._mitigator.explain(f, correlation_id)
 
-        # Escalation gate.
-        best = max((f.confidence for f in out.findings), default=0.0)
+        # Escalation gate. The escalated finding is the top-ranked one (findings
+        # are already sorted by excess x confidence). Confidence for the gate is
+        # that finding's confidence.
+        top_finding = out.findings[0] if out.findings else None
+        best = top_finding.confidence if top_finding else 0.0
         escalate = best >= self._settings.escalation_confidence
         decision = EscalationDecision(
             run_id=run_id,
             candidates_evaluated=out.candidates_enumerated,
             m_tests_conducted=out.m_tests_conducted,
             escalated=escalate,
-            finding_id=out.findings[0].pattern_id if (escalate and out.findings) else None,
+            finding_id=top_finding.pattern_id if (escalate and top_finding) else None,
             confidence=best,
             threshold=self._settings.escalation_confidence,
             suppression_reason=None if escalate else (
                 f"best confidence {best:.2f} < {self._settings.escalation_confidence}"
             ),
+            # Inline explanation of the escalated finding (self-contained escalation).
+            finding_label=top_finding.label if (escalate and top_finding) else None,
+            excess_orders=round(top_finding.excess_orders, 1) if (escalate and top_finding) else None,
+            excess_margin_usd=round(top_finding.excess_margin, 2) if (escalate and top_finding) else None,
+            narrative=top_finding.narrative if (escalate and top_finding) else None,
+            mitigation=top_finding.mitigation if (escalate and top_finding) else None,
+            expected_effect=top_finding.expected_effect if (escalate and top_finding) else None,
         )
         if escalate:
             metrics.ESCALATIONS.inc()
