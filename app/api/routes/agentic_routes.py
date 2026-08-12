@@ -51,16 +51,30 @@ async def agentic_webhook(
 @router.get("/approvals")
 async def list_approvals(
     run_id: str | None = None,
+    order_id: str | None = None,
+    limit: int = 50,
+    offset: int = 0,
     principal: Principal = Depends(require_scope("notify:send")),
 ) -> dict:
+    """List pending approvals for a run. Supports an order_id filter and
+    limit/offset paging so a large queue (tens of thousands of drafts) stays
+    navigable. Each item's payload carries the exact drafted message."""
     store = get_approval_store()
     items = store.list_pending(run_id)
+    if order_id:
+        items = [i for i in items if str(i.payload.get("order_id")) == str(order_id)]
+    total = len(items)
+    page = items[max(0, offset): max(0, offset) + max(1, limit)]
     return {
+        "total": total,
+        "returned": len(page),
+        "offset": offset,
+        "limit": limit,
         "pending": [
             {"approval_id": i.id, "run_id": i.run_id, "type": i.action_type,
              "payload": i.payload, "status": i.status.value}
-            for i in items
-        ]
+            for i in page
+        ],
     }
 
 

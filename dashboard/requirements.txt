@@ -1,0 +1,6 @@
+# Dashboard-only dependencies (the API has its own requirements.txt).
+streamlit>=1.36
+requests>=2.31
+pandas>=2.0
+# altair ships with streamlit; listed for clarity
+altair>=5.0
