@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     # --- risk-scoring parameters (Lane A) ---
     shrinkage_k: int = 50             # empirical-Bayes shrinkage constant
     eta_percentile: int = 75          # revised ETA uses P75 transit
-    triage_queue_cap: int = 200
+    triage_queue_cap: int = 0  # set 0 to draft for ALL at-risk orders (Goal 1)
 
     # --- security / reliability ---
     max_upload_mb: int = 50

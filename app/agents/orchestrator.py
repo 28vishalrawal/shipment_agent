@@ -53,14 +53,22 @@ class Orchestrator:
         return triage, notifications, report
 
     # ---------------- Lane A ----------------
-    async def _lane_a(self, ingested, run_id, correlation_id):
+    async def _lane_a(self, ingested, run_id, correlation_id,
+                      queue_cap=None, at_risk_only=False):
+        # queue_cap=None -> use the configured cap (default 200). Pass 0 to draft
+        # for EVERY open order (no cap). at_risk_only drops LOW_RISK orders so we
+        # only notify customers whose shipments are actually flagged at-risk.
         rt = build_rate_table(ingested.closed)
+        cap = self._settings.triage_queue_cap if queue_cap is None else queue_cap
         triage = score_open_orders(
             ingested.open_orders, rt,
             shrinkage_k=self._settings.shrinkage_k,
             eta_percentile=self._settings.eta_percentile,
-            queue_cap=self._settings.triage_queue_cap,
+            queue_cap=cap,
         )
+        if at_risk_only:
+            from app.domain.models import ReasonCode
+            triage = [t for t in triage if t.reason_code != ReasonCode.LOW_RISK]
         metrics.EXCEPTIONS_DETECTED.inc(len(triage))
         log_event(logger, "triage_classification_completed", run_id=run_id,
                   correlation_id=correlation_id, flagged=len(triage))

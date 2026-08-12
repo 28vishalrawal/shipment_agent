@@ -64,6 +64,28 @@ async def list_approvals(
     }
 
 
+@router.get("/approvals/{approval_id}")
+async def get_approval(
+    approval_id: str,
+    principal: Principal = Depends(require_scope("notify:send")),
+) -> dict:
+    """Preview a single pending action before deciding. For a notification this
+    returns the exact drafted message (subject + body) that would be sent; for an
+    escalation it returns the finding, narrative, mitigation and expected effect."""
+    store = get_approval_store()
+    item = store.get(approval_id)
+    if item is None:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, "approval not found")
+    return {
+        "approval_id": item.id,
+        "run_id": item.run_id,
+        "type": item.action_type,
+        "status": item.status.value,
+        "created_at": item.created_at.isoformat(),
+        "payload": item.payload,
+    }
+
+
 @router.post("/approvals/{approval_id}")
 async def decide_approval(
     approval_id: str,

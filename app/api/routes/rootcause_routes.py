@@ -16,6 +16,8 @@ from fastapi import APIRouter, Depends, File, Query, UploadFile
 
 from app.analytics.ingest import ingest
 from app.analytics.root_cause import GateParams, run_root_cause
+from app.agents.mitigation_agent import MitigationAgent
+from app.providers.factory import build_provider
 from app.api.security import Principal, require_scope
 from app.api.upload_validation import read_upload
 from app.observability.logging_setup import new_id, log_event
@@ -32,69 +34,28 @@ async def top_root_causes(
     n: int = Query(default=5, ge=1, le=50),
     include_protective: bool = Query(default=True),
     include_watchlist: bool = Query(default=True),
+    explain: bool = Query(default=True, description="generate LLM narrative/mitigation per finding"),
     principal: Principal = Depends(require_scope("analytics:read")),
 ) -> dict:
     run_id = new_id()
-    correlation_id = new_id()
     s = get_settings()
-
-    log_event(
-        logger,
-        "rootcause_request_received",
-        correlation_id=correlation_id,
-        run_id=run_id,
-        tenant_id=principal.tenant_id,
-        role=principal.role,
-        requested=n,
-        include_protective=include_protective,
-        include_watchlist=include_watchlist,
-        filename=getattr(file, "filename", None),
-    )
-
     df = await read_upload(file)
     ing = ingest(df)
-
     avg_margin = float(ing.closed[cm.BENEFIT_PER_ORDER].mean()) if cm.BENEFIT_PER_ORDER in ing.closed.columns else 0.0
-
-    log_event(
-        logger,
-        "rootcause_analytics_started",
-        correlation_id=correlation_id,
-        run_id=run_id,
-        closed_rows=len(ing.closed),
-        dims_available=len([c for c in cm.__dict__.values() if isinstance(c, str) and c in ing.closed.columns]),
-        avg_margin=round(avg_margin, 6),
-        support_floor=s.support_floor,
-        effect_size_min=s.effect_size_min,
-        fdr_q=s.fdr_q,
-        confound_margin=s.confound_margin,
-        stability_var_max=s.stability_var_max,
-    )
-
     out = run_root_cause(
         ing.closed,
-        GateParams(
-            support_floor=s.support_floor,
-            effect_size_min=s.effect_size_min,
-            fdr_q=s.fdr_q,
-            confound_margin=s.confound_margin,
-            stability_var_max=s.stability_var_max,
-        ),
+        GateParams(support_floor=s.support_floor, effect_size_min=s.effect_size_min,
+                   fdr_q=s.fdr_q, confound_margin=s.confound_margin,
+                   stability_var_max=s.stability_var_max),
         avg_margin=avg_margin,
     )
 
-    log_event(
-        logger,
-        "rootcause_analytics_completed",
-        correlation_id=correlation_id,
-        run_id=run_id,
-        candidates_enumerated=out.candidates_enumerated,
-        m_tests_conducted=out.m_tests_conducted,
-        validated_count=len(out.findings),
-        protective_count=len(out.protective),
-        rejected_count=len(out.rejected),
-        global_late_rate=round(out.global_rate, 6),
-    )
+    # Populate narrative / mitigation / expected_effect on each validated finding
+    # via the mitigation agent (LLM). Skipped when explain=false to save calls.
+    if explain and out.findings:
+        mitigator = MitigationAgent(build_provider(s), s)
+        for f in out.findings:
+            await mitigator.explain(f, run_id)
 
     ranked: list[dict] = []
 
@@ -107,6 +68,9 @@ async def top_root_causes(
             "excess_margin_usd": round(f.excess_margin, 2),
             "confidence": round(f.confidence, 3),
             "evidence_grade": f.evidence_grade,
+            "narrative": f.narrative,
+            "mitigation": f.mitigation,
+            "expected_effect": f.expected_effect,
         })
 
     if include_protective:
@@ -125,7 +89,7 @@ async def top_root_causes(
         near = [r for r in out.rejected
                 if r.failed_gate in ("gate4_confound", "gate5_stability")
                 and r.p_value is not None]
-        near.sort(key=lambda r: float(r.p_value or 0.0))
+        near.sort(key=lambda r: r.p_value if r.p_value is not None else float("inf"))
         for r in near:
             if len(ranked) >= n:
                 break

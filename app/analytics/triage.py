@@ -69,9 +69,12 @@ def score_open_orders(
             )
         )
 
-    # Prioritise: keep top-N by impact + all high-prob high-value tail.
+    # Prioritise by impact. queue_cap <= 0 means "no cap": return ALL at-risk
+    # orders (satisfies Goal 1's "draft a notification for each"). A positive cap
+    # returns the top-N by impact plus a high-prob/high-value tail (alert-fatigue
+    # control for ops who want a prioritised subset).
     records.sort(key=lambda r: r.impact_score, reverse=True)
-    if len(records) <= queue_cap:
+    if queue_cap is None or queue_cap <= 0 or len(records) <= queue_cap:
         return records
     if records:
         vals = sorted((r.value_at_risk for r in records))
