@@ -189,6 +189,15 @@ def fill_template_for_order(
         if old and new and old != new:
             subject = subject.replace(old, new)
             body = body.replace(old, new)
+    # Safety net: a representative draft with an empty subject/body would
+    # otherwise propagate an empty message to the whole pooled group. Never
+    # emit a blank message — synthesize a safe, personalized one.
+    if not subject or not subject.strip():
+        subject = f"Update on your order {record.order_id}"
+    if not body or not body.strip():
+        body = (f"Hello,\n\nYour order {record.order_id} containing {product} is now "
+                f"expected to arrive by {record.revised_eta.isoformat()}. We apologise "
+                f"for the delay and appreciate your patience.\n\nKind regards,\nCustomer Care")
     # Safety net: ensure this order's id and revised date are present verbatim.
     if record.order_id not in body:
         body += f"\n\nOrder reference: {record.order_id}."

@@ -39,6 +39,7 @@ class Settings(BaseSettings):
     confound_margin: float = 0.15     # Gate 4: min lift vs every parent
     stability_var_max: float = 0.30   # Gate 5: max cross-half variation
     escalation_confidence: float = 0.75  # escalation gate threshold
+    max_escalations: int = 2          # how many top findings may escalate per run
 
     # --- risk-scoring parameters (Lane A) ---
     shrinkage_k: int = 50             # empirical-Bayes shrinkage constant

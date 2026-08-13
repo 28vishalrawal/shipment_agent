@@ -114,6 +114,9 @@ class EscalationDecision(BaseModel):
     candidates_evaluated: int
     m_tests_conducted: int
     escalated: bool
+    # Position of this finding in the ranked root-cause list (1 = strongest).
+    # A run may raise several escalations; rank orders them for the operator.
+    rank: int = 1
     finding_id: Optional[str] = None
     confidence: float
     threshold: float

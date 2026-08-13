@@ -12,7 +12,11 @@ import logging
 from app.agentic.context import RunContext
 from app.agentic.react_agent import ReactAgent
 from app.agents.mitigation_agent import MitigationAgent
-from app.agents.orchestrator import Orchestrator as DeterministicOrchestrator
+from app.agents.orchestrator import (
+    Orchestrator as DeterministicOrchestrator,
+    build_escalation_decision,
+    build_escalation_decisions,
+)
 from app.analytics.ingest import IngestResult
 from app.approval.store import get_approval_store
 from app.core.config import Settings
@@ -24,7 +28,7 @@ from app.tools.registry import build_registry
 logger = logging.getLogger("agentic.orchestrator")
 
 # How many ranked root causes to surface in the agentic response.
-TOP_N_ROOT_CAUSES = 5
+TOP_N_ROOT_CAUSES = 10
 
 
 def _escalation_fields(f) -> dict:
@@ -94,10 +98,6 @@ class AgenticOrchestrator:
         # EVERY at-risk order deterministically (template-pooled, so this is a
         # few LLM calls, not one per order) and queue one approval per order,
         # carrying the draft. Orders the agent already proposed are de-duplicated.
-        already = {
-            a.get("order_id") for a in ctx.pending_approvals
-            if a.get("type") == "send_notification"
-        }
         det = DeterministicOrchestrator(self._provider, self._settings)
         triage_records, notifications = await det._lane_a(
             ingested, run_id, correlation_id, queue_cap=0, at_risk_only=True
@@ -105,9 +105,15 @@ class AgenticOrchestrator:
         ctx.triage = triage_records
         ctx.notifications = notifications
         draft_by_id = {n.order_id: n for n in notifications}
+
+        # Drop the triage agent's lightweight notification proposals: they carry
+        # only order_id/p_late (no drafted subject/body/tier), which is exactly
+        # why those orders showed up empty on the approval page. The deterministic
+        # coverage below drafts EVERY at-risk order in full and owns the queue.
+        ctx.pending_approvals = [
+            a for a in ctx.pending_approvals if a.get("type") != "send_notification"
+        ]
         for rec in triage_records:
-            if rec.order_id in already:
-                continue
             n = draft_by_id.get(rec.order_id)
             ctx.pending_approvals.append({
                 "type": "send_notification",
@@ -138,86 +144,114 @@ class AgenticOrchestrator:
         # actionable for ops leadership. Also apply the confidence gate: if the
         # agent proposed nothing but a validated finding clears the threshold,
         # escalate it anyway (mirrors agents/orchestrator.py).
-        rc_out = ctx.scratch.get("root_cause_output")
-        if rc_out is None:
-            # The agent may have skipped leaving its analysis in scratch; compute
-            # the validated findings once so escalations can still be grounded.
-            from app.analytics.root_cause import GateParams, run_root_cause
-            from app.core import column_mapping as cm
-            avg_margin = (
-                float(ingested.closed[cm.BENEFIT_PER_ORDER].mean())
-                if cm.BENEFIT_PER_ORDER in ingested.closed.columns else 0.0
-            )
-            rc_out = run_root_cause(
-                ingested.closed,
-                GateParams(
-                    support_floor=self._settings.support_floor,
-                    effect_size_min=self._settings.effect_size_min,
-                    fdr_q=self._settings.fdr_q,
-                    confound_margin=self._settings.confound_margin,
-                    stability_var_max=self._settings.stability_var_max,
-                ),
-                avg_margin=avg_margin,
-            )
-            ctx.scratch["root_cause_output"] = rc_out
+        # Authoritative root-cause report: ALWAYS computed with the full
+        # dimension set (identical to /analyze's _lane_b), independent of any
+        # exclude_shipping_mode experiments the root-cause agent ran via its
+        # tool. Previously this used the agent's scratch output, so a
+        # mode-excluded agent run hid 'shipping_mode=First Class' and produced
+        # 0 root causes / no escalation while /analyze escalated it.
+        from app.analytics.root_cause import GateParams, run_root_cause
+        from app.core import column_mapping as cm
+        avg_margin = (
+            float(ingested.closed[cm.BENEFIT_PER_ORDER].mean())
+            if cm.BENEFIT_PER_ORDER in ingested.closed.columns else 0.0
+        )
+        rc_out = run_root_cause(
+            ingested.closed,
+            GateParams(
+                support_floor=self._settings.support_floor,
+                effect_size_min=self._settings.effect_size_min,
+                fdr_q=self._settings.fdr_q,
+                confound_margin=self._settings.confound_margin,
+                stability_var_max=self._settings.stability_var_max,
+            ),
+            avg_margin=avg_margin,
+        )
 
         top = rc_out.findings[0] if rc_out.findings else None
+        mitigator = MitigationAgent(self._provider, self._settings)
+
+        async def _explain(f):
+            if f.narrative is None:
+                await mitigator.explain(f, correlation_id)
+
+        # Validation status per candidate pattern, for labelling.
+        status_by_pid = {f.pattern_id: "validated" for f in rc_out.findings}
+        for r in rc_out.rejected:
+            status_by_pid.setdefault(r.pattern_id, r.failed_gate)
+
+        # Ranked root causes for the UI: validated findings first (with
+        # mitigation), then fill up to TOP_N with the strongest candidate
+        # segments so the panel is never empty when signals exist but none
+        # cleared full validation. Candidates are clearly graded 'hypothesis'.
         root_causes: list[dict] = []
+        for rank, f in enumerate(rc_out.findings[:TOP_N_ROOT_CAUSES], start=1):
+            await _explain(f)
+            row = {"rank": rank, "dimensions": f.dims, "status": "validated"}
+            row.update(_escalation_fields(f))
+            root_causes.append(row)
+
+        if len(root_causes) < TOP_N_ROOT_CAUSES:
+            seen = {r.get("finding_label") for r in root_causes}
+            for c in rc_out.top_candidates:
+                if len(root_causes) >= TOP_N_ROOT_CAUSES:
+                    break
+                if c["pattern_id"] in seen:
+                    continue
+                gate = status_by_pid.get(c["pattern_id"], "candidate")
+                root_causes.append({
+                    "rank": len(root_causes) + 1,
+                    "finding_label": c["pattern_id"],
+                    "dimensions": c["dims"],
+                    "status": gate,
+                    "n": c["n"],
+                    "late_rate": round(c["rate"], 4),
+                    "baseline_rate": round(c["base"], 4),
+                    "lift": round(c["lift"], 3),
+                    "excess_orders": round(c["excess"], 1),
+                    "excess_margin_usd": None,
+                    "confidence": None,
+                    "evidence_grade": "hypothesis",
+                    "narrative": None,
+                    "mitigation": (f"Candidate signal — did not clear full validation "
+                                   f"({gate}). Investigate before acting."),
+                    "expected_effect": None,
+                })
+
+        # --- Escalation: reuse the SAME EscalationDecision the /analyze pipeline
+        # emits (build_escalation_decision), so the UI shows identical, rich,
+        # self-contained detail (confidence, threshold, excess_orders,
+        # excess_margin_usd, narrative, mitigation, expected_effect). The
+        # deterministic confidence gate on the top validated finding is
+        # authoritative; the agent's ad-hoc free-text escalations are dropped.
+        # Up to settings.max_escalations findings may escalate, so every one of
+        # them needs its narrative/mitigation inlined before the decisions are
+        # built (not just the single top finding).
+        for f in rc_out.findings[:max(0, self._settings.max_escalations)]:
+            await _explain(f)
+        decisions = build_escalation_decisions(run_id, rc_out, self._settings)
+        escalations = [d.model_dump() for d in decisions]
+
+        # `escalation` (singular) stays in the payload for backward compatibility:
+        # the top decision when one escalated, otherwise the suppressed decision
+        # carrying the reason the gate held.
         if top is not None:
-            mitigator = MitigationAgent(self._provider, self._settings)
+            await _explain(top)
+        top_decision = build_escalation_decision(run_id, rc_out, self._settings)
+        escalation = escalations[0] if escalations else top_decision.model_dump()
 
-            def _match_finding(label: str):
-                # Prefer a finding whose dimension values all appear in the
-                # agent's label; fall back to the top-ranked finding.
-                for f in rc_out.findings:
-                    if f.dims and all(str(v) in (label or "") for v in f.dims.values()):
-                        return f
-                return top
-
-            async def _explain(f):
-                if f.narrative is None:
-                    await mitigator.explain(f, correlation_id)
-
-            escalation_actions = [
-                a for a in ctx.pending_approvals if a.get("type") == "file_escalation"
-            ]
-            for action in escalation_actions:
-                f = _match_finding(action.get("finding_label", ""))
-                await _explain(f)
-                action.update(_escalation_fields(f))
-
-            # Confidence gate for the autonomous path.
-            if not escalation_actions and top.confidence >= self._settings.escalation_confidence:
-                await _explain(top)
-                gated = {
-                    "type": "file_escalation",
-                    "justification": "auto-escalated: confidence >= threshold",
-                    "status": "pending_approval",
-                }
-                gated.update(_escalation_fields(top))
-                ctx.pending_approvals.append(gated)
-
-            # Ranked top-N root causes (with recommended mitigation per cause) so
-            # leadership can see the full picture, not only what was escalated.
-            for rank, f in enumerate(rc_out.findings[:TOP_N_ROOT_CAUSES], start=1):
-                await _explain(f)
-                row = {"rank": rank, "dimensions": f.dims}
-                row.update(_escalation_fields(f))
-                root_causes.append(row)
-
-        escalations = [
-            {
-                "status": a.get("status"),
-                **{k: a.get(k) for k in (
-                    "finding_label", "late_rate", "baseline_rate", "lift",
-                    "excess_orders", "excess_margin_usd", "confidence",
-                    "evidence_grade", "narrative", "mitigation", "expected_effect",
-                )},
-            }
-            for a in ctx.pending_approvals if a.get("type") == "file_escalation"
+        ctx.pending_approvals = [
+            a for a in ctx.pending_approvals if a.get("type") != "file_escalation"
         ]
-        log_event(logger, "escalations_enriched", run_id=run_id,
-                  correlation_id=correlation_id, escalations=len(escalations))
+        for e in escalations:
+            ctx.pending_approvals.append(
+                {"type": "file_escalation", "status": "pending_approval", **e}
+            )
+        log_event(logger, "escalation_decision_created", run_id=run_id,
+                  correlation_id=correlation_id,
+                  escalated=bool(escalations), escalation_count=len(escalations),
+                  finding_ids=[e.get("finding_id") for e in escalations],
+                  suppression_reason=top_decision.suppression_reason)
 
         # Move proposed actions into the approval store (human-in-the-loop gate).
         store = get_approval_store()
@@ -240,6 +274,7 @@ class AgenticOrchestrator:
             "notifications_drafted": len(ctx.notifications),
             "approvals_created": len(queued),
             "root_causes": root_causes,
+            "escalation": escalation,
             "escalations": escalations,
             "triage_agent": {
                 "final_answer": triage_trace.final_answer,

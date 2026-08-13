@@ -29,6 +29,69 @@ from app.observability.logging_setup import log_event, new_id
 from app.observability import metrics
 from app.providers.base import LLMProvider
 
+
+def _decision_for(run_id: str, out, settings: Settings, finding, rank: int) -> EscalationDecision:
+    """Wrap one ranked finding in the self-contained EscalationDecision shape,
+    applying the confidence gate. `finding` may be None (nothing validated), in
+    which case a suppressed decision is returned.
+    """
+    conf = finding.confidence if finding else 0.0
+    escalate = bool(finding) and conf >= settings.escalation_confidence
+    return EscalationDecision(
+        run_id=run_id,
+        candidates_evaluated=out.candidates_enumerated,
+        m_tests_conducted=out.m_tests_conducted,
+        escalated=escalate,
+        rank=rank,
+        finding_id=finding.pattern_id if escalate else None,
+        confidence=conf,
+        threshold=settings.escalation_confidence,
+        suppression_reason=None if escalate else (
+            f"best confidence {conf:.2f} < {settings.escalation_confidence}"
+        ),
+        finding_label=finding.label if escalate else None,
+        excess_orders=round(finding.excess_orders, 1) if escalate else None,
+        excess_margin_usd=round(finding.excess_margin, 2) if escalate else None,
+        narrative=finding.narrative if escalate else None,
+        mitigation=finding.mitigation if escalate else None,
+        expected_effect=finding.expected_effect if escalate else None,
+    )
+
+
+def build_escalation_decisions(
+    run_id: str, out, settings: Settings, limit: int | None = None
+) -> list[EscalationDecision]:
+    """Build up to `limit` escalation decisions — one per ranked root-cause
+    finding that clears the confidence gate.
+
+    Findings arrive already ranked by impact (|excess orders| x confidence), so
+    taking the first `limit` yields the strongest systemic causes. Only findings
+    that individually clear `escalation_confidence` are returned, which keeps the
+    alert-fatigue guard intact: a weak second finding is simply omitted rather
+    than padded in to fill the slot.
+
+    Callers must have populated narrative/mitigation/expected_effect on each
+    surfaced finding (via MitigationAgent) before calling if they want those
+    inlined.
+    """
+    limit = settings.max_escalations if limit is None else limit
+    limit = max(0, limit)
+    decisions = [
+        _decision_for(run_id, out, settings, f, rank)
+        for rank, f in enumerate(out.findings[:limit], start=1)
+    ]
+    return [d for d in decisions if d.escalated]
+
+
+def build_escalation_decision(run_id: str, out, settings: Settings) -> EscalationDecision:
+    """Single top-finding escalation decision, retained for the deterministic
+    /analyze pipeline (RootCauseReport.escalation is a single object) and for
+    backward compatibility. Always returns a decision — suppressed when the top
+    finding misses the gate or nothing validated.
+    """
+    top_finding = out.findings[0] if out.findings else None
+    return _decision_for(run_id, out, settings, top_finding, 1)
+
 logger = logging.getLogger("orchestrator")
 
 
@@ -172,36 +235,15 @@ class Orchestrator:
         for f in out.findings:
             await self._mitigator.explain(f, correlation_id)
 
-        # Escalation gate. The escalated finding is the top-ranked one (findings
-        # are already sorted by excess x confidence). Confidence for the gate is
-        # that finding's confidence.
+        # Escalation gate (shared builder — identical shape to the agentic path).
         top_finding = out.findings[0] if out.findings else None
-        best = top_finding.confidence if top_finding else 0.0
-        escalate = best >= self._settings.escalation_confidence
-        decision = EscalationDecision(
-            run_id=run_id,
-            candidates_evaluated=out.candidates_enumerated,
-            m_tests_conducted=out.m_tests_conducted,
-            escalated=escalate,
-            finding_id=top_finding.pattern_id if (escalate and top_finding) else None,
-            confidence=best,
-            threshold=self._settings.escalation_confidence,
-            suppression_reason=None if escalate else (
-                f"best confidence {best:.2f} < {self._settings.escalation_confidence}"
-            ),
-            # Inline explanation of the escalated finding (self-contained escalation).
-            finding_label=top_finding.label if (escalate and top_finding) else None,
-            excess_orders=round(top_finding.excess_orders, 1) if (escalate and top_finding) else None,
-            excess_margin_usd=round(top_finding.excess_margin, 2) if (escalate and top_finding) else None,
-            narrative=top_finding.narrative if (escalate and top_finding) else None,
-            mitigation=top_finding.mitigation if (escalate and top_finding) else None,
-            expected_effect=top_finding.expected_effect if (escalate and top_finding) else None,
-        )
+        decision = build_escalation_decision(run_id, out, self._settings)
+        escalate = decision.escalated
         if escalate:
             metrics.ESCALATIONS.inc()
             log_event(logger, "systemic_risk_detected", run_id=run_id,
                       correlation_id=correlation_id, finding=decision.finding_id,
-                      confidence=round(best, 3))
+                      confidence=round(decision.confidence, 3))
         log_event(logger, "escalation_decision_created", run_id=run_id,
                   correlation_id=correlation_id, escalated=escalate,
                   suppression_reason=decision.suppression_reason)

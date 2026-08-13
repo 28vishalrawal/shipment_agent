@@ -39,6 +39,16 @@ def check_notification(
     max_words: int = 180,
 ) -> OutputCheck:
     reasons: list[str] = []
+
+    # A blank subject or body is never acceptable — force the deterministic
+    # fallback (which always has both). Without this, an LLM that returns an
+    # empty subject would pass and, via template pooling, propagate the empty
+    # subject to every order sharing that message shape.
+    if not subject or not subject.strip():
+        reasons.append("empty_subject")
+    if not body or not body.strip():
+        reasons.append("empty_body")
+
     text = f"{subject}\n{body}"
 
     for pat, label in PROHIBITED:

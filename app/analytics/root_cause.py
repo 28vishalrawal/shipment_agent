@@ -54,6 +54,10 @@ class RootCauseOutput:
     m_tests_conducted: int
     global_rate: float
     protective: list[ValidatedFinding] = field(default_factory=list)
+    # Strongest candidate segments by |excess late orders|, captured BEFORE the
+    # strict gates, so callers can always surface the top signals (with metrics
+    # and their eventual validation status) even when none clear full validation.
+    top_candidates: list[dict] = field(default_factory=list)
 
 
 def _key_str(dims: tuple[str, ...], values: tuple) -> str:
@@ -150,6 +154,26 @@ def run_root_cause(
     se = np.sqrt(cand["base"] * (1 - cand["base"]) / cand["n"])
     cand["z"] = (cand["rate"] - cand["base"]) / se
     cand["p"] = 2 * (1 - stats.norm.cdf(cand["z"].abs()))
+
+    # Snapshot the strongest DELAY candidate segments (most excess LATE orders)
+    # now, before the strict effect/FDR/confound/stability gates prune them.
+    # Only positive-excess segments are delay contributors; negative-excess
+    # segments are protective (they ship better than baseline) and are excluded.
+    # Metrics only; the caller attaches each candidate's final validation status.
+    _ranked = cand[cand["excess"] > 0].sort_values("excess", ascending=False)
+    top_candidates = [
+        {
+            "pattern_id": _key_str(row["dims"], row["key"]),
+            "dims": dict(zip(row["dims"], map(str, row["key"]))),
+            "n": int(row["n"]),
+            "rate": float(row["rate"]),
+            "base": float(row["base"]),
+            "lift": float(row["lift"]),
+            "excess": float(row["excess"]),
+            "p_value": float(row["p"]) if pd.notna(row["p"]) else None,
+        }
+        for _, row in _ranked.head(20).iterrows()
+    ]
 
     # --- Gate 2: effect size ---
     passed_g2 = (cand["lift"] - 1).abs() >= params.effect_size_min
@@ -274,4 +298,5 @@ def run_root_cause(
         m_tests_conducted=m_tests,
         global_rate=G,
         protective=protective,
+        top_candidates=top_candidates,
     )
