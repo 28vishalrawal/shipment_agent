@@ -13,8 +13,8 @@ Every numeric claim is computed deterministically in Python/pandas/scipy. The LL
 ## Quick start
 
 ```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+python -m venv .venv && source .venv/Scripts/activate
+python -m pip install --no-user -r requirements.txt
 cp .env.example .env            # leave keys blank to run with the mock provider
 
 # generate synthetic, PII-free data
@@ -24,7 +24,7 @@ python scripts/make_synthetic_data.py --rows 8000 --out data/synthetic_orders.cs
 pytest -q
 
 # start the API
-uvicorn app.api.app:app --reload
+python -m uvicorn app.api.app:app --reload
 ```
 
 ## OpenAI configuration
@@ -52,10 +52,10 @@ curl -s localhost:8000/auth/token -H 'content-type: application/json' \
 Analyze an orders file:
 
 ```bash
-curl -s localhost:8000/v1/analyze \
-  -H "Authorization: Bearer <jwt>" \
-  -H "Idempotency-Key: run-2026-08-08-001" \
-  -F "file=@data/synthetic_orders.csv"
+curl -s http://localhost:8000/v1/analyze ^
+  -H "Authorization: Bearer <jwt>" ^
+  -H "Idempotency-Key: run-2026-08-08-001" ^
+  -F "file=@data\\DataCoSupplyChainDataset.csv;type=text/csv"
 ```
 
 Response (abridged):
@@ -100,3 +100,12 @@ Health and metrics: `GET /health`, `GET /metrics` (Prometheus).
 - **Load:** for 180k orders, Lane B runs in-process in seconds; parallelise notification drafting with bounded concurrency (already implemented) and rate-limit the provider.
 
 See `docs/DESIGN.md` for the full architecture, schema, workflow, guardrail, and phasing detail.
+
+## Switching roles (important)
+
+The dashboard shows what your connected token allows, not what the radio says. If you change Sign in as from Analyst to Operations Manager, you must click Connect again — otherwise you stay on the previous token and the Approvals tab shows the locked, view-only state. The sidebar shows Connected as: and warns when the selected role differs from the connected one.
+
+In the Manager Approvals tab you can search by order ID, page through the queue, and for each order review the exact drafted message and Approve & send or Reject it.
+
+Notes
+The approval store is in-memory in the starter, so create and act on the queue within the same running API process.
