@@ -23,7 +23,7 @@ class _MitigationSchema(BaseModel):
 
 
 class MitigationAgent:
-    def __init__(self, provider: LLMProvider, settings: Settings) -> None:
+    def __init__(self, provider: LLMProvider, settings: AppSettings) -> None:
         self._provider = provider
         self._settings = settings
         self._breaker = CircuitBreaker()
@@ -81,9 +81,15 @@ class MitigationAgent:
             finding.expected_effect = out.expected_effect
         except ProviderError as exc:
             # Deterministic fallback narrative: purely descriptive, no invented cause.
-            log_event(logger, "fallback_response_used", status="ok",
+            # A 4xx here means misconfiguration (bad key, wrong auth header, unknown
+            # model), not a flaky endpoint — log it loudly so the run isn't quietly
+            # carried by templates while the dashboard still looks healthy.
+            status_code = getattr(exc, "status_code", None)
+            log_event(logger, "fallback_response_used",
+                      status="error" if status_code in (400, 401, 403, 404, 422) else "ok",
                       correlation_id=correlation_id, agent_name="mitigation",
-                      error_code=type(exc).__name__)
+                      error_code=type(exc).__name__, status_code=status_code,
+                      error_detail=str(exc)[:300])
             finding.narrative = (
                 f"Observed fact: segment {finding.label} shows a late rate of "
                 f"{finding.seg_rate:.1%} versus a baseline of {finding.baseline_rate:.1%} "

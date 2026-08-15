@@ -7,6 +7,7 @@ MockProvider makes the whole system testable with zero network + zero keys.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any, Type, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -44,23 +45,102 @@ _PRICES = {
 
 
 def _estimate_cost(model: str, pin: int, pout: int) -> float:
+    # Self-hosted models have no per-token price and correctly estimate to 0.0;
+    # track tokens/latency rather than cost when running locally.
     cin, cout = _PRICES.get(model, (0.0, 0.0))
     return round(pin / 1000 * cin + pout / 1000 * cout, 6)
 
 
+_THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
+_THINK_OPEN = re.compile(r"^.*?</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
+
+
+def _message_text(msg: Any, strip_reasoning: bool = True) -> str:
+    """Content of a chat message with any reasoning trace removed.
+
+    Reasoning models (Nemotron 3, and others with a thinking budget) emit a
+    chain-of-thought. When the server runs with a reasoning parser it arrives in
+    a separate `reasoning_content` field and `content` is already clean; without
+    one it is inlined in `content` wrapped in <think> tags, which breaks every
+    downstream json.loads. Strip both shapes so structured output survives
+    either server configuration.
+    """
+    text = getattr(msg, "content", None) or ""
+    if not strip_reasoning or not text:
+        return text
+    text = _THINK_BLOCK.sub("", text)
+    # An unterminated opener means the trace ran to the token limit; if a closing
+    # tag exists, everything before it is reasoning.
+    if "</think" in text.lower() or "</reasoning" in text.lower():
+        text = _THINK_OPEN.sub("", text)
+    return text.strip()
+
+
+def _json_payload(text: str) -> str:
+    """First balanced JSON object in a string.
+
+    Smaller models often wrap JSON in prose or ```json fences despite explicit
+    instructions. Extracting the outermost braces is far cheaper than a retry.
+    """
+    start = text.find("{")
+    if start == -1:
+        return text
+    depth, in_str, esc = 0, False, False
+    for i, ch in enumerate(text[start:], start):
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return text[start:]
+
+
 class OpenAIProvider:
-    def __init__(self, settings: Settings) -> None:
-        if not settings.openai_api_key:
-            raise ProviderError("OPENAI_API_KEY missing")
+    def __init__(self, settings: Settings, name: str = "openai") -> None:
         # Imported lazily so the package is optional for mock-only runs.
         from openai import AsyncOpenAI
 
-        self.name = "openai"
+        base_url = (settings.llm_base_url or "").strip() or None
+        api_key = settings.llm_api_key or settings.openai_api_key
+
+        # Hosted OpenAI genuinely needs a key. A self-hosted vLLM/NIM endpoint
+        # often does not, so only hard-fail when we're pointed at OpenAI itself.
+        if not api_key and base_url is None:
+            raise ProviderError("OPENAI_API_KEY missing")
+
+        # Gateways that authenticate on a bespoke header (e.g. x-api-key) reject
+        # the SDK's default `Authorization: Bearer <key>`. Send the key on the
+        # configured header instead, and pass a placeholder to the SDK, which
+        # requires a non-empty api_key even when the header is unused.
+        headers: dict[str, str] = {}
+        if settings.llm_api_key_header and api_key:
+            headers[settings.llm_api_key_header] = api_key
+            sdk_key = "unused"
+        else:
+            sdk_key = api_key or "not-needed"
+
+        self.name = name
         self.model = settings.llm_model
         self._temperature = settings.llm_temperature
         self._timeout = settings.llm_timeout_s
+        self._strip_reasoning = settings.llm_strip_reasoning
+        self._use_json_mode = settings.llm_use_json_mode
         self._client = AsyncOpenAI(
-            api_key=settings.openai_api_key, timeout=settings.llm_timeout_s
+            api_key=sdk_key,
+            base_url=base_url,
+            timeout=settings.llm_timeout_s,
+            default_headers=headers or None,
         )
 
     async def generate_text(
@@ -90,7 +170,7 @@ class OpenAIProvider:
             ),
         )
         return LLMResult(
-            text=resp.choices[0].message.content or "",
+            text=_message_text(resp.choices[0].message, self._strip_reasoning),
             model=self.model,
             provider=self.name,
             usage=usage,
@@ -106,20 +186,27 @@ class OpenAIProvider:
             + "\n\nReturn ONLY a JSON object matching this schema:\n"
             + json.dumps(schema.model_json_schema())
         )
+        kwargs: dict[str, Any] = {}
+        if self._use_json_mode:
+            # Not every OpenAI-compatible server implements JSON mode; the schema
+            # is also stated in the prompt above, so this is belt-and-braces.
+            kwargs["response_format"] = {"type": "json_object"}
         try:
             resp = await self._client.chat.completions.create(
                 model=self.model,
                 temperature=self._temperature,
                 max_tokens=max_tokens,
-                response_format={"type": "json_object"},
                 messages=[
                     {"role": "system", "content": sys},
                     {"role": "user", "content": user},
                 ],
+                **kwargs,
             )
         except Exception as exc:
             raise _provider_error(exc) from exc
-        content = resp.choices[0].message.content or "{}"
+        content = _json_payload(
+            _message_text(resp.choices[0].message, self._strip_reasoning)
+        ) or "{}"
         u = resp.usage
         usage = LLMUsage(
             prompt_tokens=getattr(u, "prompt_tokens", 0),
@@ -176,8 +263,8 @@ class OpenAIProvider:
             ),
         )
         return LLMToolResult(
-            tool_calls=calls, text=msg.content or "", model=self.model,
-            provider=self.name, usage=usage,
+            tool_calls=calls, text=_message_text(msg, self._strip_reasoning),
+            model=self.model, provider=self.name, usage=usage,
         )
 
 
@@ -305,6 +392,13 @@ def build_provider(settings: Settings) -> LLMProvider:
     match settings.llm_provider:
         case "openai":
             return OpenAIProvider(settings)
+        case "nemotron":
+            # Any OpenAI-compatible endpoint: vLLM, NIM, Ollama, or a routing
+            # gateway. Same wire protocol, so OpenAIProvider drives it directly;
+            # the distinct name keeps logs and metrics honest about what ran.
+            if not settings.llm_base_url:
+                raise ProviderError("LLM_BASE_URL required for provider=nemotron")
+            return OpenAIProvider(settings, name="nemotron")
         case "anthropic":
             return AnthropicProvider(settings)
         case "gemini":

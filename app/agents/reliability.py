@@ -33,6 +33,18 @@ class CircuitBreaker:
             self._opened_at = time.time()
 
 
+# 4xx codes that signal a broken request or bad credentials rather than a
+# transient fault. Retrying these burns the retry budget and trips the breaker
+# for the rest of the run, turning a fixable config error (wrong key, wrong auth
+# header, unknown model name) into a silent slide onto template fallbacks.
+# 408 and 429 are excluded: those are genuinely worth retrying.
+_NON_RETRYABLE = {400, 401, 403, 404, 405, 422}
+
+
+def _is_retryable(exc: ProviderError) -> bool:
+    return getattr(exc, "status_code", None) not in _NON_RETRYABLE
+
+
 async def with_retries(coro_factory, *, max_retries: int, breaker: CircuitBreaker):
     """coro_factory: zero-arg callable returning a fresh awaitable each attempt."""
     if not breaker.allow():
@@ -45,6 +57,10 @@ async def with_retries(coro_factory, *, max_retries: int, breaker: CircuitBreake
             return result, attempt
         except ProviderError as exc:
             last = exc
+            if not _is_retryable(exc):
+                # Surface immediately and leave the breaker untouched — the
+                # endpoint is healthy, the request is wrong.
+                raise
             breaker.record_failure()
             if attempt >= max_retries or not breaker.allow():
                 break

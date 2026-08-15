@@ -1,0 +1,349 @@
+{
+  "info": {
+    "_postman_id": "0dfcf9f5-398a-411b-83fc-e3a4410b3a76",
+    "name": "shipment_agent",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "_exporter_id": "6533469"
+  },
+  "item": [
+    {
+      "name": "TokenGeneration",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "content-type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\r\n    \"username\": \"amy\",\r\n    \"role\": \"analyst\"\r\n}",
+          "options": {
+            "raw": {
+              "language": "json"
+            }
+          }
+        },
+        "url": {
+          "raw": "localhost:8000/auth/token",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "auth",
+            "token"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Analyze",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{auth_secret_0wd7}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/C:/Vishal/Work/Python/shipment_agent/data/DataCoSupplyChainDataset.csv"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/v1/analyze",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "v1",
+            "analyze"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "RootCause",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{auth_secret_0wd7}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/C:/Vishal/Work/Python/shipment_agent/data/DataCoSupplyChainDataset.csv"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/v1/root-causes?n=5",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "v1",
+            "root-causes"
+          ],
+          "query": [
+            {
+              "key": "n",
+              "value": "5"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "RootCause With Explain",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{json_web_token_145h}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/C:/Vishal/Work/Python/shipment_agent/data/DataCoSupplyChainDataset.csv"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/v1/root-causes?n=5&explain=true",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "v1",
+            "root-causes"
+          ],
+          "query": [
+            {
+              "key": "n",
+              "value": "5"
+            },
+            {
+              "key": "explain",
+              "value": "true"
+            }
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Metric",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "http://localhost:8000/metrics",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "metrics"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Webhook",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{supabase_service_role_api_key_091s}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [
+          {
+            "key": "Authorization",
+            "value": "Bearer <service-account-jwt>"
+          }
+        ],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/C:/Vishal/Work/Python/shipment_agent/data/DataCoSupplyChainDataset.csv"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/v1/agentic/webhook",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "v1",
+            "agentic",
+            "webhook"
+          ]
+        }
+      },
+      "response": []
+    },
+    {
+      "name": "Run",
+      "request": {
+        "auth": {
+          "type": "bearer",
+          "bearer": [
+            {
+              "key": "token",
+              "value": "{{supabase_service_role_api_key_091s}}",
+              "type": "string"
+            }
+          ]
+        },
+        "method": "POST",
+        "header": [],
+        "body": {
+          "mode": "formdata",
+          "formdata": [
+            {
+              "key": "file",
+              "type": "file",
+              "src": "/C:/Vishal/Work/Python/shipment_agent/data/DataCoSupplyChainDataset.csv"
+            }
+          ]
+        },
+        "url": {
+          "raw": "http://localhost:8000/v1/agentic/run",
+          "protocol": "http",
+          "host": [
+            "localhost"
+          ],
+          "port": "8000",
+          "path": [
+            "v1",
+            "agentic",
+            "run"
+          ]
+        }
+      },
+      "response": []
+    }
+  ],
+  "auth": {
+    "type": "bearer",
+    "bearer": [
+      {
+        "key": "token",
+        "value": "{{json_web_token_0a7k}}",
+        "type": "string"
+      }
+    ]
+  },
+  "event": [
+    {
+      "listen": "prerequest",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    },
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "packages": {},
+        "requests": {},
+        "exec": [
+          ""
+        ]
+      }
+    }
+  ],
+  "variable": [
+    {
+      "key": "json_web_token_18z7",
+      "secret": true
+    },
+    {
+      "key": "bearer_token_0uis",
+      "secret": true
+    },
+    {
+      "key": "auth_secret_0wd7",
+      "secret": true
+    },
+    {
+      "key": "auth_secret_19o3",
+      "secret": true
+    },
+    {
+      "key": "json_web_token_0a7k",
+      "secret": true
+    },
+    {
+      "key": "json_web_token_145h",
+      "secret": true
+    },
+    {
+      "key": "supabase_service_role_api_key_091s",
+      "secret": true
+    }
+  ]
+}

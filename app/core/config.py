@@ -19,8 +19,27 @@ class Settings(BaseSettings):
     build_version: str = "0.1.0"
 
     # --- LLM provider selection (provider-agnostic switch) ---
-    llm_provider: Literal["openai", "anthropic", "gemini", "azure_openai", "mock"] = "openai"
+    llm_provider: Literal[
+        "openai", "anthropic", "gemini", "azure_openai", "mock", "nemotron"
+    ] = "openai"
     llm_model: str = "gpt-4o-mini"
+    # OpenAI-compatible endpoint for self-hosted / gateway inference (vLLM, NIM,
+    # Ollama, or a routing gateway). Must include the /v1 suffix. Leave unset to
+    # talk to api.openai.com.
+    llm_base_url: str = ""
+    llm_api_key: str = Field(default="", repr=False)
+    # Some gateways authenticate with a bespoke header (e.g. "x-api-key") rather
+    # than the OpenAI SDK's default `Authorization: Bearer <key>`. When set, the
+    # key is sent in this header instead.
+    llm_api_key_header: str = ""
+    # Reasoning models (Nemotron 3 and friends) emit a thinking trace. When vLLM
+    # runs with --reasoning-parser it is split into a separate `reasoning_content`
+    # field; without one it is prepended to message.content and breaks JSON
+    # parsing. Enabled by default so structured output survives either setup.
+    llm_strip_reasoning: bool = True
+    # vLLM's JSON mode support varies by build; disable to fall back to
+    # prompt-instructed JSON plus tolerant parsing.
+    llm_use_json_mode: bool = True
     llm_timeout_s: float = 30.0
     llm_max_retries: int = 3
     llm_temperature: float = 0.2
