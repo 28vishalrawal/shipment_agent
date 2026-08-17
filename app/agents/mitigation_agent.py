@@ -23,7 +23,7 @@ class _MitigationSchema(BaseModel):
 
 
 class MitigationAgent:
-    def __init__(self, provider: LLMProvider, settings: AppSettings) -> None:
+    def __init__(self, provider: LLMProvider, settings: Settings) -> None:
         self._provider = provider
         self._settings = settings
         self._breaker = CircuitBreaker()

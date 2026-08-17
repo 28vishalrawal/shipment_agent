@@ -23,6 +23,7 @@ from app.core.config import Settings
 from app.observability.logging_setup import log_event, new_id
 from app.prompts import agentic_v1
 from app.providers.base import LLMProvider
+from app.providers.factory import role_provider
 from app.tools.registry import build_registry
 
 logger = logging.getLogger("agentic.orchestrator")
@@ -56,6 +57,11 @@ class AgenticOrchestrator:
         self._provider = provider
         self._settings = settings
         self._registry = build_registry()
+        # The ReAct agents are the only role that needs tool calling, so they can
+        # be pinned to a tool-capable model independently of the models used for
+        # mitigation narratives and customer drafts.
+        self._agent_provider = role_provider(settings, "agents", provider)
+        self._mitigation_provider = role_provider(settings, "mitigation", provider)
 
     async def run(self, ingested: IngestResult, correlation_id: str | None = None) -> dict:
         run_id = new_id()
@@ -66,13 +72,13 @@ class AgenticOrchestrator:
                   correlation_id=correlation_id, prompt_version=agentic_v1.PROMPT_VERSION)
 
         triage_agent = ReactAgent(
-            self._provider, self._registry, self._settings,
+            self._agent_provider, self._registry, self._settings,
             allowed_tools=["summarize_data", "segment_late_rate",
                            "score_triage_queue", "propose_customer_notification"],
             max_steps=8,
         )
         root_cause_agent = ReactAgent(
-            self._provider, self._registry, self._settings,
+            self._agent_provider, self._registry, self._settings,
             allowed_tools=["summarize_data", "segment_late_rate",
                            "run_root_cause_analysis", "propose_ops_escalation"],
             max_steps=8,
@@ -98,9 +104,45 @@ class AgenticOrchestrator:
         # EVERY at-risk order deterministically (template-pooled, so this is a
         # few LLM calls, not one per order) and queue one approval per order,
         # carrying the draft. Orders the agent already proposed are de-duplicated.
+        #
+        # Notification coverage (IO/LLM-bound) and root-cause analysis
+        # (CPU-bound pandas/scipy) are independent, so they run concurrently —
+        # the same overlap /analyze already gets from lane_a || lane_b. The
+        # root-cause call is synchronous and holds the event loop for seconds on
+        # a full batch, which would block the whole FastAPI process and prevent
+        # the overlap from happening at all, so it is pushed to a worker thread.
+        from app.analytics.root_cause import GateParams, run_root_cause
+        from app.core import column_mapping as cm
+
+        avg_margin = (
+            float(ingested.closed[cm.BENEFIT_PER_ORDER].mean())
+            if cm.BENEFIT_PER_ORDER in ingested.closed.columns else 0.0
+        )
+        gate_params = GateParams(
+            support_floor=self._settings.support_floor,
+            effect_size_min=self._settings.effect_size_min,
+            fdr_q=self._settings.fdr_q,
+            confound_margin=self._settings.confound_margin,
+            stability_var_max=self._settings.stability_var_max,
+        )
+
         det = DeterministicOrchestrator(self._provider, self._settings)
-        triage_records, notifications = await det._lane_a(
-            ingested, run_id, correlation_id, queue_cap=0, at_risk_only=True
+        coverage_task = asyncio.create_task(
+            det._lane_a(ingested, run_id, correlation_id, queue_cap=0, at_risk_only=True)
+        )
+        # Authoritative root-cause report: ALWAYS computed with the full
+        # dimension set (identical to /analyze's _lane_b), independent of any
+        # exclude_shipping_mode experiments the root-cause agent ran via its
+        # tool. Previously this used the agent's scratch output, so a
+        # mode-excluded agent run hid 'shipping_mode=First Class' and produced
+        # 0 root causes / no escalation while /analyze escalated it.
+        rc_task2 = asyncio.create_task(
+            asyncio.to_thread(
+                run_root_cause, ingested.closed, gate_params, avg_margin=avg_margin
+            )
+        )
+        (triage_records, notifications), rc_out = await asyncio.gather(
+            coverage_task, rc_task2
         )
         ctx.triage = triage_records
         ctx.notifications = notifications
@@ -144,36 +186,24 @@ class AgenticOrchestrator:
         # actionable for ops leadership. Also apply the confidence gate: if the
         # agent proposed nothing but a validated finding clears the threshold,
         # escalate it anyway (mirrors agents/orchestrator.py).
-        # Authoritative root-cause report: ALWAYS computed with the full
-        # dimension set (identical to /analyze's _lane_b), independent of any
-        # exclude_shipping_mode experiments the root-cause agent ran via its
-        # tool. Previously this used the agent's scratch output, so a
-        # mode-excluded agent run hid 'shipping_mode=First Class' and produced
-        # 0 root causes / no escalation while /analyze escalated it.
-        from app.analytics.root_cause import GateParams, run_root_cause
-        from app.core import column_mapping as cm
-        avg_margin = (
-            float(ingested.closed[cm.BENEFIT_PER_ORDER].mean())
-            if cm.BENEFIT_PER_ORDER in ingested.closed.columns else 0.0
-        )
-        rc_out = run_root_cause(
-            ingested.closed,
-            GateParams(
-                support_floor=self._settings.support_floor,
-                effect_size_min=self._settings.effect_size_min,
-                fdr_q=self._settings.fdr_q,
-                confound_margin=self._settings.confound_margin,
-                stability_var_max=self._settings.stability_var_max,
-            ),
-            avg_margin=avg_margin,
-        )
-
+        # rc_out was computed above, concurrently with notification coverage.
         top = rc_out.findings[0] if rc_out.findings else None
-        mitigator = MitigationAgent(self._provider, self._settings)
+        mitigator = MitigationAgent(self._mitigation_provider, self._settings)
 
         async def _explain(f):
             if f.narrative is None:
                 await mitigator.explain(f, correlation_id)
+
+        # Every finding that will be surfaced (root-cause panel or escalation)
+        # needs a narrative. These are independent per-finding LLM calls, so they
+        # are issued concurrently rather than one at a time — the difference is
+        # small against a hosted API but significant against a local reasoning
+        # model, where each call carries a thinking budget. _explain is a no-op
+        # once a finding has a narrative, so the awaits further down are cheap
+        # and the code stays correct if this slice ever misses one.
+        _n_explain = max(TOP_N_ROOT_CAUSES, self._settings.max_escalations)
+        if rc_out.findings:
+            await asyncio.gather(*(_explain(f) for f in rc_out.findings[:_n_explain]))
 
         # Validation status per candidate pattern, for labelling.
         status_by_pid = {f.pattern_id: "validated" for f in rc_out.findings}

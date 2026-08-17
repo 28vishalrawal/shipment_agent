@@ -32,6 +32,9 @@ class Settings(BaseSettings):
     # than the OpenAI SDK's default `Authorization: Bearer <key>`. When set, the
     # key is sent in this header instead.
     llm_api_key_header: str = ""
+    # Set true when a gateway rejects any Authorization header it doesn't
+    # recognise. Only meaningful alongside llm_api_key_header.
+    llm_disable_bearer: bool = False
     # Reasoning models (Nemotron 3 and friends) emit a thinking trace. When vLLM
     # runs with --reasoning-parser it is split into a separate `reasoning_content`
     # field; without one it is prepended to message.content and breaks JSON
@@ -40,6 +43,30 @@ class Settings(BaseSettings):
     # vLLM's JSON mode support varies by build; disable to fall back to
     # prompt-instructed JSON plus tolerant parsing.
     llm_use_json_mode: bool = True
+
+    # --- Per-role model routing -------------------------------------------
+    # The three LLM roles have different requirements: the ReAct agents need
+    # reliable tool calling, mitigation needs the best reasoning (its narrative
+    # goes to ops leadership, ~2 calls per run), and notification drafting wants
+    # a small fast model (short customer-facing text, no reasoning needed).
+    # Every field below falls back to the corresponding global setting when
+    # blank, so leaving them unset preserves single-model behaviour exactly.
+    llm_model_agents: str = ""
+    llm_model_mitigation: str = ""
+    llm_model_notification: str = ""
+    # Only needed when a role is served by a different endpoint (e.g. drafting
+    # on a local Ollama while mitigation goes to a gateway). Leave blank to
+    # share the global endpoint and credentials.
+    llm_base_url_agents: str = ""
+    llm_base_url_mitigation: str = ""
+    llm_base_url_notification: str = ""
+    llm_api_key_agents: str = Field(default="", repr=False)
+    llm_api_key_mitigation: str = Field(default="", repr=False)
+    llm_api_key_notification: str = Field(default="", repr=False)
+    llm_api_key_header_agents: str = ""
+    llm_api_key_header_mitigation: str = ""
+    llm_api_key_header_notification: str = ""
+
     llm_timeout_s: float = 30.0
     llm_max_retries: int = 3
     llm_temperature: float = 0.2
@@ -78,6 +105,19 @@ class Settings(BaseSettings):
     # --- feature flags ---
     require_human_review: bool = True
     enable_llm_notifications: bool = True
+
+    # --- file-drop trigger ---
+    # Directory watched for dropped batches. Blank disables the watcher entirely,
+    # so tests, CLI runs and one-off API usage never spawn a background loop.
+    trigger_inbox_dir: str = ""
+    # Where a file is moved once its run finishes. Failures land in a "failed"
+    # subdirectory of this path so a bad file is retained for inspection without
+    # being retried forever.
+    trigger_archive_dir: str = ""
+    trigger_poll_s: int = 5
+    # A file must report the same size across two consecutive polls before it is
+    # read, so a large copy still in progress is not parsed half-written.
+    trigger_stable_polls: int = 2
 
     @property
     def is_prod(self) -> bool:

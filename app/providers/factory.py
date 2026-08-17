@@ -112,23 +112,32 @@ class OpenAIProvider:
         from openai import AsyncOpenAI
 
         base_url = (settings.llm_base_url or "").strip() or None
-        api_key = settings.llm_api_key or settings.openai_api_key
+        api_key = (settings.llm_api_key or settings.openai_api_key or "").strip()
 
         # Hosted OpenAI genuinely needs a key. A self-hosted vLLM/NIM endpoint
         # often does not, so only hard-fail when we're pointed at OpenAI itself.
         if not api_key and base_url is None:
             raise ProviderError("OPENAI_API_KEY missing")
 
-        # Gateways that authenticate on a bespoke header (e.g. x-api-key) reject
-        # the SDK's default `Authorization: Bearer <key>`. Send the key on the
-        # configured header instead, and pass a placeholder to the SDK, which
-        # requires a non-empty api_key even when the header is unused.
+        # Gateways vary in where they look for the credential. Send the real key
+        # on the configured header AND as the standard Bearer token, so we work
+        # whichever one the server reads. Set llm_disable_bearer when a gateway
+        # actively rejects an Authorization header it doesn't recognise.
         headers: dict[str, str] = {}
-        if settings.llm_api_key_header and api_key:
-            headers[settings.llm_api_key_header] = api_key
-            sdk_key = "unused"
-        else:
-            sdk_key = api_key or "not-needed"
+        auth_header = (settings.llm_api_key_header or "").strip()
+        if auth_header and api_key:
+            headers[auth_header] = api_key
+
+        self._extra_headers: dict[str, Any] = {}
+        if settings.llm_disable_bearer and auth_header.lower() != "authorization":
+            from openai._types import Omit
+
+            # Must be per-request: the SDK only recognises Omit in request-level
+            # headers, and silently keeps the Bearer if passed via default_headers.
+            # Skipped when the configured header IS Authorization — there the
+            # custom value has already replaced the Bearer token, and omitting it
+            # would strip the credential entirely and 401.
+            self._extra_headers["Authorization"] = Omit()
 
         self.name = name
         self.model = settings.llm_model
@@ -137,7 +146,7 @@ class OpenAIProvider:
         self._strip_reasoning = settings.llm_strip_reasoning
         self._use_json_mode = settings.llm_use_json_mode
         self._client = AsyncOpenAI(
-            api_key=sdk_key,
+            api_key=api_key or "not-needed",
             base_url=base_url,
             timeout=settings.llm_timeout_s,
             default_headers=headers or None,
@@ -148,6 +157,7 @@ class OpenAIProvider:
     ) -> LLMResult:
         try:
             resp = await self._client.chat.completions.create(
+                extra_headers=self._extra_headers or None,
                 model=self.model,
                 temperature=self._temperature,
                 max_tokens=max_tokens,
@@ -193,6 +203,7 @@ class OpenAIProvider:
             kwargs["response_format"] = {"type": "json_object"}
         try:
             resp = await self._client.chat.completions.create(
+                extra_headers=self._extra_headers or None,
                 model=self.model,
                 temperature=self._temperature,
                 max_tokens=max_tokens,
@@ -238,6 +249,7 @@ class OpenAIProvider:
         import json as _json
         try:
             resp = await self._client.chat.completions.create(
+                extra_headers=self._extra_headers or None,
                 model=self.model,
                 temperature=self._temperature,
                 max_tokens=max_tokens,
@@ -388,7 +400,46 @@ def _placeholder_for(schema: Type[T]) -> dict:
     return out
 
 
-def build_provider(settings: Settings) -> LLMProvider:
+LLM_ROLES = ("agents", "mitigation", "notification")
+
+# Global settings a role may override, in the order they are resolved.
+_ROLE_OVERRIDABLE = ("llm_model", "llm_base_url", "llm_api_key", "llm_api_key_header")
+
+
+def settings_for_role(settings: Settings, role: str | None) -> Settings:
+    """Settings with any per-role LLM overrides applied.
+
+    Returns the *same object* when the role configures nothing, which callers
+    rely on to detect "no override" cheaply via identity.
+    """
+    if not role:
+        return settings
+    if role not in LLM_ROLES:
+        raise ProviderError(f"unknown LLM role {role!r}; expected one of {LLM_ROLES}")
+    updates = {
+        field: value
+        for field in _ROLE_OVERRIDABLE
+        if (value := getattr(settings, f"{field}_{role}", ""))
+    }
+    return settings.model_copy(update=updates) if updates else settings
+
+
+def role_provider(settings: Settings, role: str, default: LLMProvider) -> LLMProvider:
+    """Provider for one role, or `default` when the role overrides nothing.
+
+    Falling back to the injected provider (rather than rebuilding an equivalent
+    one) keeps dependency injection intact: tests and callers that hand in a
+    specific provider still have it used everywhere unless an override is
+    explicitly configured.
+    """
+    scoped = settings_for_role(settings, role)
+    if scoped is settings:
+        return default
+    return build_provider(scoped)
+
+
+def build_provider(settings: Settings, role: str | None = None) -> LLMProvider:
+    settings = settings_for_role(settings, role)
     match settings.llm_provider:
         case "openai":
             return OpenAIProvider(settings)

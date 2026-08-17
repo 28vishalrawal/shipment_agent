@@ -28,6 +28,7 @@ from app.domain.models import (
 from app.observability.logging_setup import log_event, new_id
 from app.observability import metrics
 from app.providers.base import LLMProvider
+from app.providers.factory import role_provider
 
 
 def _decision_for(run_id: str, out, settings: Settings, finding, rank: int) -> EscalationDecision:
@@ -98,8 +99,16 @@ logger = logging.getLogger("orchestrator")
 class Orchestrator:
     def __init__(self, provider: LLMProvider, settings: Settings) -> None:
         self._settings = settings
-        self._notifier = NotificationAgent(provider, settings)
-        self._mitigator = MitigationAgent(provider, settings)
+        # Each agent gets its role's provider when one is configured, otherwise
+        # the injected provider. Built once here rather than per call: client
+        # construction opens no connections, but repeating it per notification
+        # would be wasteful.
+        self._notifier = NotificationAgent(
+            role_provider(settings, "notification", provider), settings
+        )
+        self._mitigator = MitigationAgent(
+            role_provider(settings, "mitigation", provider), settings
+        )
 
     async def run(
         self, ingested: IngestResult, correlation_id: str | None = None
@@ -121,28 +130,43 @@ class Orchestrator:
         # queue_cap=None -> use the configured cap (default 200). Pass 0 to draft
         # for EVERY open order (no cap). at_risk_only drops LOW_RISK orders so we
         # only notify customers whose shipments are actually flagged at-risk.
-        rt = build_rate_table(ingested.closed)
         cap = self._settings.triage_queue_cap if queue_cap is None else queue_cap
-        triage = score_open_orders(
-            ingested.open_orders, rt,
-            shrinkage_k=self._settings.shrinkage_k,
-            eta_percentile=self._settings.eta_percentile,
-            queue_cap=cap,
-        )
-        if at_risk_only:
-            from app.domain.models import ReasonCode
-            triage = [t for t in triage if t.reason_code != ReasonCode.LOW_RISK]
+
+        def _cpu_prelude():
+            """Rate table, triage scoring and the grounding index.
+
+            Pure CPU over the whole open cohort and the single largest blocking
+            section in the pipeline, so it runs in a worker thread: on the event
+            loop it stops the API answering health checks or approval actions for
+            the duration, and prevents this lane overlapping with root-cause
+            analysis in the agentic flow.
+            """
+            rt = build_rate_table(ingested.closed)
+            recs = score_open_orders(
+                ingested.open_orders, rt,
+                shrinkage_k=self._settings.shrinkage_k,
+                eta_percentile=self._settings.eta_percentile,
+                queue_cap=cap,
+            )
+            if at_risk_only:
+                from app.domain.models import ReasonCode
+                recs = [t for t in recs if t.reason_code != ReasonCode.LOW_RISK]
+            # Map order_id -> source row for grounding (open cohort only).
+            # to_dict("records") rather than iterrows(): the latter builds a
+            # Series per row, which dominates runtime on a large open cohort.
+            index = {}
+            if cm.ORDER_ID in ingested.open_orders.columns:
+                index = {
+                    str(r[cm.ORDER_ID]): r
+                    for r in ingested.open_orders.to_dict("records")
+                }
+            return recs, index
+
+        triage, by_id = await asyncio.to_thread(_cpu_prelude)
+
         metrics.EXCEPTIONS_DETECTED.inc(len(triage))
         log_event(logger, "triage_classification_completed", run_id=run_id,
                   correlation_id=correlation_id, flagged=len(triage))
-
-        # Map order_id -> source row for grounding (open cohort only).
-        by_id = {}
-        if cm.ORDER_ID in ingested.open_orders.columns:
-            by_id = {
-                str(r[cm.ORDER_ID]): r.to_dict()
-                for _, r in ingested.open_orders.iterrows()
-            }
 
         # ---- Template pooling: draft ONE message per distinct template shape,
         # then fill every other order in that shape deterministically. Turns N
