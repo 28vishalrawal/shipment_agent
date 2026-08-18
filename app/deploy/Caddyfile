@@ -1,0 +1,35 @@
+# TLS terminator for the MCP mount.
+#
+# NemoClaw rejects http:// and local URLs at `mcp add`, so the endpoint must be
+# HTTPS on a publicly resolvable name. Caddy is used because it obtains and
+# renews a Let's Encrypt certificate automatically — replace MCP_HOST below with
+# a real DNS name pointing at this Brev instance's public IP, or ACME issuance
+# will fail.
+#
+#   caddy run --config deploy/Caddyfile
+#
+# Ports 80 and 443 must be open in the Brev security group: 80 is required for
+# the ACME HTTP-01 challenge even though no traffic is served on it.
+
+shipment-mcp.example.com {
+	# Only the MCP mount is published. The REST API, /metrics and the dashboard
+	# stay on the private interface — a sandboxed agent has no reason to reach
+	# the upload or approval endpoints, and exposing them would put the human
+	# review gate behind a single shared bearer token.
+	handle /mcp/* {
+		reverse_proxy 127.0.0.1:8000 {
+			# Streamable HTTP holds long-lived response streams. The default
+			# flush behaviour buffers them, which stalls sessions until the
+			# buffer fills.
+			flush_interval -1
+		}
+	}
+
+	handle {
+		respond "not found" 404
+	}
+
+	log {
+		output file /var/log/caddy/mcp-access.log
+	}
+}
