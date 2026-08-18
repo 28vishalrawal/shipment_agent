@@ -194,7 +194,7 @@ with st.sidebar:
     role_value = "analyst" if role_label == "Analyst" else "operations_manager"
     username = st.text_input("Username", value="demo")
 
-    if st.button("🔌 Connect", use_container_width=True, type="primary", key="btn_connect"):
+    if st.button("🔌 Connect", use_container_width=True, type="primary"):
         try:
             tok = get_token(api_base, username, role_value)
             ss.token, ss.role, ss.scopes = tok, role_value, decode_scopes(tok)
@@ -273,31 +273,11 @@ def _load_run(base: str, run_id: str) -> None:
     """
     r = api_get(base, f"/v1/runs/{run_id}", ss.token)
     if r.status_code == 200:
-        body = r.json()
-        ss.agentic = body.get("result") or {}
-        # Kept so the banner below can name the run. Streamlit does not switch
-        # tabs on rerun, so without visible confirmation the button looks dead.
-        ss.loaded_run = {k: body.get(k) for k in
-                         ("run_id", "source", "file_name", "created_at", "triggered_by")}
+        ss.agentic = r.json().get("result") or {}
+        ss.loaded_run_id = run_id
         st.rerun()
     else:
         show_api_error(r)
-
-
-# A stored run stays loaded across reruns; say so plainly, because the tabs
-# above will otherwise look identical to a freshly-run batch.
-_lr = ss.get("loaded_run")
-if _lr:
-    b1, b2 = st.columns([5, 1])
-    b1.success(
-        f"Viewing stored run **{_lr.get('file_name') or _lr.get('run_id', '')[:12]}** "
-        f"({_lr.get('source')}, triggered by {_lr.get('triggered_by') or 'system'}) — "
-        f"the Overview, Agents and Root-cause tabs show this run."
-    )
-    if b2.button("Clear", key="btn_clear_loaded", use_container_width=True):
-        ss.loaded_run = None
-        ss.agentic = None
-        st.rerun()
 
 # --------------------------- Overview --------------------------- #
 with tabs[0]:
@@ -440,9 +420,9 @@ with tabs[3]:
         sc1, sc2, sc3 = st.columns([3, 1, 1])
         search = sc1.text_input("Find an order by ID", value=ss.appr_search,
                                 placeholder="e.g. 70524", label_visibility="collapsed")
-        if sc2.button("🔎 Search", use_container_width=True, key="btn_appr_search"):
+        if sc2.button("🔎 Search", use_container_width=True):
             ss.appr_search = search; ss.appr_offset = 0; load_approvals_page(api_base)
-        if sc3.button("🔄 Refresh", use_container_width=True, key="btn_appr_refresh"):
+        if sc3.button("🔄 Refresh", use_container_width=True):
             load_approvals_page(api_base)
 
         if ss.appr_page is None:
@@ -486,13 +466,13 @@ with tabs[3]:
         # Pager
         st.divider()
         pcol = st.columns([1, 2, 1])
-        if pcol[0].button("◀ Previous", disabled=ss.appr_offset <= 0, use_container_width=True, key="btn_appr_prev"):
+        if pcol[0].button("◀ Previous", disabled=ss.appr_offset <= 0, use_container_width=True):
             ss.appr_offset = max(0, ss.appr_offset - APPR_PAGE_SIZE); load_approvals_page(api_base); st.rerun()
         shown_lo = 0 if total == 0 else ss.appr_offset + 1
         shown_hi = min(ss.appr_offset + APPR_PAGE_SIZE, total)
         pcol[1].markdown(f"<div style='text-align:center'>Showing {shown_lo}–{shown_hi} of {total:,}</div>",
                          unsafe_allow_html=True)
-        if pcol[2].button("Next ▶", disabled=shown_hi >= total, use_container_width=True, key="btn_appr_next"):
+        if pcol[2].button("Next ▶", disabled=shown_hi >= total, use_container_width=True):
             ss.appr_offset = ss.appr_offset + APPR_PAGE_SIZE; load_approvals_page(api_base); st.rerun()
 
 # --------------------------- Run history --------------------------- #
@@ -500,11 +480,9 @@ with tabs[4]:
     st.caption("Every run is stored, whichever trigger produced it — upload, webhook, "
                "file drop or scheduler. Open one to load its analysis into the tabs above.")
     cols = st.columns([1, 1, 2])
-    src = cols[0].selectbox("Source", ["all", "upload", "webhook", "file_drop", "scheduler"],
-                            key="runs_source")
-    limit = cols[1].number_input("Show", min_value=5, max_value=200, value=25, step=5,
-                                 key="runs_limit")
-    if cols[2].button("🔄 Refresh", use_container_width=True, key="btn_runs_refresh"):
+    src = cols[0].selectbox("Source", ["all", "upload", "webhook", "file_drop", "scheduler"])
+    limit = cols[1].number_input("Show", min_value=5, max_value=200, value=25, step=5)
+    if cols[2].button("🔄 Refresh", use_container_width=True):
         st.rerun()
 
     params = {"limit": int(limit)}
@@ -540,29 +518,3 @@ with tabs[4]:
                 if not failed and st.button("Open this run", key=f"open_{rid}",
                                             use_container_width=True):
                     _load_run(api_base, rid)
-
-                # Render the headline findings right here too. Streamlit keeps
-                # the active tab on rerun, so a user who clicks "Open this run"
-                # stays on this tab — showing nothing here made the button look
-                # broken even though the other tabs had updated.
-                if _lr and _lr.get("run_id") == rid:
-                    loaded = ss.agentic or {}
-                    escs = loaded.get("escalations") or []
-                    rcs = loaded.get("root_causes") or []
-                    st.divider()
-                    if escs:
-                        for e in escs[:TOP_N_ESCALATIONS]:
-                            st.error(f"🚨 {e.get('finding_label') or e.get('finding_id')}")
-                            render_escalation_details(e)
-                    validated = [r for r in rcs if r.get("status") == "validated"]
-                    if validated:
-                        st.markdown("**Validated root causes**")
-                        st.dataframe(
-                            [{"finding": v.get("finding_label"),
-                              "late rate": v.get("seg_rate"),
-                              "lift": v.get("lift"),
-                              "excess orders": v.get("excess_orders"),
-                              "margin at risk": v.get("excess_margin")} for v in validated],
-                            use_container_width=True, hide_index=True)
-                    elif not escs:
-                        st.info("This run produced no validated root causes.")

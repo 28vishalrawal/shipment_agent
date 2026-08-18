@@ -1,6 +1,7 @@
 """Routes for the agentic layer: autonomous run, webhook trigger, approvals."""
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from fastapi import APIRouter, Depends, File, HTTPException, UploadFile, status
@@ -13,6 +14,7 @@ from app.api.upload_validation import read_upload
 from app.approval.store import ApprovalStatus, get_approval_store
 from app.core.config import get_settings
 from app.observability.logging_setup import log_event, new_id
+from app.persistence.run_store import get_run_store
 from app.providers.factory import build_provider
 
 logger = logging.getLogger("api.agentic")
@@ -27,6 +29,7 @@ class ApprovalDecision(BaseModel):
 async def agentic_run(
     file: UploadFile = File(...),
     principal: Principal = Depends(require_scope("analytics:run")),
+    source: str = "upload",
 ) -> dict:
     """Launch the two autonomous tool-calling agents on an uploaded batch."""
     correlation_id = new_id()
@@ -34,7 +37,16 @@ async def agentic_run(
     ingested = ingest(df)
     s = get_settings()
     orch = AgenticOrchestrator(build_provider(s), s)
-    return await orch.run(ingested, correlation_id)
+    result = await orch.run(ingested, correlation_id)
+    # Persisted so the analysis outlives this response: a manager can open the
+    # run later from /v1/runs without having been the one who uploaded it.
+    store = get_run_store()
+    await asyncio.to_thread(
+        store.save, result.get("run_id") or correlation_id, result,
+        source=source, triggered_by=principal.sub,
+        file_name=file.filename, rows=len(df),
+    )
+    return result
 
 
 @router.post("/webhook")
@@ -45,7 +57,7 @@ async def agentic_webhook(
     """Event-driven trigger. In prod this would accept a reference (S3 key) and
     fetch the batch; here it accepts the file directly for a self-contained demo."""
     log_event(logger, "trigger_fired", source="webhook", tenant_id=principal.tenant_id)
-    return await agentic_run(file=file, principal=principal)
+    return await agentic_run(file=file, principal=principal, source="webhook")
 
 
 @router.get("/approvals")

@@ -39,7 +39,7 @@ def captured(monkeypatch) -> list[tuple[int, str]]:
     """Replace the orchestrator run so tests exercise file mechanics only."""
     seen: list[tuple[int, str]] = []
 
-    async def fake(df, settings, source):
+    async def fake(df, settings, source, **kwargs):
         seen.append((len(df), source))
         return {"rows": len(df)}
 
