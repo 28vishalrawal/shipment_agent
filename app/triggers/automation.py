@@ -32,6 +32,7 @@ from app.agentic.orchestrator import AgenticOrchestrator
 from app.analytics.ingest import ingest
 from app.core.config import Settings
 from app.observability.logging_setup import log_event, new_id
+from app.persistence.run_store import get_run_store
 from app.providers.factory import build_provider
 
 logger = logging.getLogger("triggers")
@@ -90,13 +91,42 @@ def _archive(path: Path, archive_dir: Path, failed: bool = False) -> Path | None
         return None
 
 
-async def dispatch_run(df: pd.DataFrame, settings: Settings, source: str) -> dict:
+async def dispatch_run(
+    df: pd.DataFrame,
+    settings: Settings,
+    source: str,
+    *,
+    triggered_by: str | None = None,
+    file_name: str | None = None,
+) -> dict:
+    """Run the agentic pipeline and persist the result.
+
+    Saving here rather than at each call site means every trigger — upload,
+    webhook, file drop, scheduler — produces an identical, retrievable record.
+    Previously a file-drop run's analysis was discarded the moment this returned,
+    so nobody could see the root causes behind a dropped batch.
+    """
     correlation_id = new_id()
     log_event(logger, "trigger_fired", correlation_id=correlation_id, source=source,
               rows=len(df))
     ingested = ingest(df)
     orch = AgenticOrchestrator(build_provider(settings), settings)
-    return await orch.run(ingested, correlation_id)
+    store = get_run_store()
+    try:
+        result = await orch.run(ingested, correlation_id)
+    except Exception as exc:
+        # A failed drop that leaves no trace is indistinguishable from a file
+        # that was never picked up, so record the attempt before re-raising.
+        await asyncio.to_thread(
+            store.save_failure, correlation_id, f"{type(exc).__name__}: {exc}",
+            source=source, triggered_by=triggered_by, file_name=file_name,
+        )
+        raise
+    await asyncio.to_thread(
+        store.save, result.get("run_id") or correlation_id, result,
+        source=source, triggered_by=triggered_by, file_name=file_name, rows=len(df),
+    )
+    return result
 
 
 def _read_batch(path: Path, settings: Settings) -> pd.DataFrame:
@@ -142,7 +172,8 @@ async def dispatch_file(
         # Parsing and the run itself are CPU-heavy; keep them off the event loop
         # so the API stays responsive while a batch is processing.
         df = await asyncio.to_thread(_read_batch, path, settings)
-        return await dispatch_run(df, settings, source)
+        return await dispatch_run(df, settings, source,
+                                  triggered_by=path.name, file_name=path.name)
     except Exception:
         failed = True
         raise
