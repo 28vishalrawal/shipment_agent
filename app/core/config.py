@@ -99,6 +99,19 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_expiry_minutes: int = 60
 
+    # --- MCP surface (read-only tools for sandboxed agents) ---
+    # Off by default: the mount publishes analytics to any holder of the bearer
+    # token, so enabling it is an explicit decision.
+    mcp_enabled: bool = False
+    mcp_bearer_token: str = Field(default="", repr=False)
+    # Directory MCP tools may read batch files from. Falls back to the file-drop
+    # archive so the conversational surface sees what the pipeline already ran.
+    mcp_dataset_dir: str = ""
+    # Public hostnames the MCP mount answers to, comma-separated. Required
+    # behind a TLS terminator, which rewrites Host to the public name.
+    mcp_allowed_hosts: str = ""
+    mcp_context_cache_size: int = 4
+
     # --- persistence ---
     database_url: str = "sqlite+aiosqlite:///./data/app.db"
 
