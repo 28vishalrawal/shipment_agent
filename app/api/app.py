@@ -4,7 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Request, Response
@@ -30,25 +30,34 @@ async def lifespan(app: FastAPI):
     task is cancelled and awaited so an in-flight batch is not abandoned silently.
     """
     s = get_settings()
-    task: asyncio.Task | None = None
-    if s.trigger_inbox_dir:
-        inbox = Path(s.trigger_inbox_dir)
-        archive = Path(s.trigger_archive_dir) if s.trigger_archive_dir else inbox.parent / "archive"
-        task = asyncio.create_task(
-            watch_inbox(s, inbox, archive), name="file-drop-watcher"
-        )
-    else:
-        log_event(logger, "file_watch_disabled",
-                  reason="TRIGGER_INBOX_DIR not set")
-    try:
-        yield
-    finally:
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+
+    # The Streamable HTTP transport keeps per-session state that must be opened
+    # and closed with the process. Entered via AsyncExitStack so the watcher's
+    # cancellation below still runs even if the manager's exit raises.
+    async with AsyncExitStack() as stack:
+        if getattr(app.state, "mcp_server", None) is not None:
+            await stack.enter_async_context(app.state.mcp_server.session_manager.run())
+            log_event(logger, "mcp_mounted", path="/mcp")
+
+        task: asyncio.Task | None = None
+        if s.trigger_inbox_dir:
+            inbox = Path(s.trigger_inbox_dir)
+            archive = Path(s.trigger_archive_dir) if s.trigger_archive_dir else inbox.parent / "archive"
+            task = asyncio.create_task(
+                watch_inbox(s, inbox, archive), name="file-drop-watcher"
+            )
+        else:
+            log_event(logger, "file_watch_disabled",
+                      reason="TRIGGER_INBOX_DIR not set")
+        try:
+            yield
+        finally:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
 
 
 def create_app() -> FastAPI:
@@ -59,6 +68,19 @@ def create_app() -> FastAPI:
     app.include_router(agentic_router)
     app.include_router(rootcause_router)
     app.include_router(run_router)
+
+    # Mounted before the timing middleware is declared so MCP traffic is
+    # measured like any other path. app.state.mcp_server stays None when
+    # disabled, which is what the lifespan branches on.
+    app.state.mcp_server = None
+    if s.mcp_enabled:
+        if not s.mcp_bearer_token:
+            raise RuntimeError("MCP_ENABLED is true but MCP_BEARER_TOKEN is unset")
+        from app.mcp_server.server import build_mcp_asgi_app
+
+        mcp_server, mcp_app = build_mcp_asgi_app(s)
+        app.state.mcp_server = mcp_server
+        app.mount("/mcp", mcp_app)
 
     @app.middleware("http")
     async def timing(request: Request, call_next):
