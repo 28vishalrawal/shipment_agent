@@ -559,10 +559,10 @@ with tabs[4]:
                         st.markdown("**Validated root causes**")
                         st.dataframe(
                             [{"finding": v.get("finding_label"),
-                              "late rate": v.get("seg_rate"),
+                              "late rate": v.get("late_rate"),
                               "lift": v.get("lift"),
                               "excess orders": v.get("excess_orders"),
-                              "margin at risk": v.get("excess_margin")} for v in validated],
+                              "margin at risk": v.get("excess_margin_usd")} for v in validated],
                             use_container_width=True, hide_index=True)
                     elif not escs:
                         st.info("This run produced no validated root causes.")
