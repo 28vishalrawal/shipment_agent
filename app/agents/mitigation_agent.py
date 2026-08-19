@@ -63,7 +63,7 @@ class MitigationAgent:
                     system=mitigation_v1.SYSTEM,
                     user=mitigation_v1.build_user_prompt(facts),
                     schema=_MitigationSchema,
-                    max_tokens=500,
+                    max_tokens=3072,
                 )
 
             (out, result), retries = await with_retries(

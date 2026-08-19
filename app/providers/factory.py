@@ -52,7 +52,7 @@ def _estimate_cost(model: str, pin: int, pout: int) -> float:
 
 
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN = re.compile(r"^.*?</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
+_THINK_CLOSE = re.compile(r".*</(?:think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
 
 
 def _message_text(msg: Any, strip_reasoning: bool = True) -> str:
@@ -65,14 +65,27 @@ def _message_text(msg: Any, strip_reasoning: bool = True) -> str:
     downstream json.loads. Strip both shapes so structured output survives
     either server configuration.
     """
+    # If the server runs a reasoning parser, the trace is split into
+    # reasoning_content and `content` is already clean — return it as-is.
+    reasoning = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
     text = getattr(msg, "content", None) or ""
     if not strip_reasoning or not text:
-        return text
+        return text.strip()
+    if reasoning:
+        return text.strip()
+
+    # Inlined trace. Handle all three shapes the parser-less path emits:
+    #   1. balanced   <think> ... </think> { json }
+    #   2. close-only  ... </think> { json }   (opener consumed as a token)
+    #   3. no tags     truncated mid-trace, or bare-prose preamble.
     text = _THINK_BLOCK.sub("", text)
-    # An unterminated opener means the trace ran to the token limit; if a closing
-    # tag exists, everything before it is reasoning.
-    if "</think" in text.lower() or "</reasoning" in text.lower():
-        text = _THINK_OPEN.sub("", text)
+    m = _THINK_CLOSE.search(text)
+    if m:
+        # Everything up to and including the last close tag is reasoning.
+        return text[m.end():].strip()
+    # No close tag: if a JSON object is present, _json_payload extracts it; if
+    # not, the trace was truncated before any answer — return as-is so the
+    # caller's parse fails and the deterministic fallback fires.
     return text.strip()
 
 

@@ -93,7 +93,7 @@ class NotificationAgent:
                     system=notification_v1.SYSTEM,
                     user=notification_v1.build_user_prompt(payload),
                     schema=_DraftSchema,
-                    max_tokens=400,
+                    max_tokens=2048,
                 )
             (draft, result), retries = await with_retries(
                 call, max_retries=self._settings.llm_max_retries, breaker=self._breaker
