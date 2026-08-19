@@ -52,7 +52,10 @@ def _estimate_cost(model: str, pin: int, pout: int) -> float:
 
 
 _THINK_BLOCK = re.compile(r"<(think|thinking|reasoning)>.*?</\1>", re.DOTALL | re.IGNORECASE)
-_THINK_OPEN = re.compile(r"^.*?</(think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
+# Matches from the start through the LAST closing tag (greedy), so a trace whose
+# opening <think> was consumed as a special token — leaving only a close tag —
+# is still removed in full.
+_THINK_CLOSE = re.compile(r".*</(?:think|thinking|reasoning)>", re.DOTALL | re.IGNORECASE)
 
 
 def _message_text(msg: Any, strip_reasoning: bool = True) -> str:
@@ -65,14 +68,33 @@ def _message_text(msg: Any, strip_reasoning: bool = True) -> str:
     downstream json.loads. Strip both shapes so structured output survives
     either server configuration.
     """
+    # When the server runs a reasoning parser, the trace is already split out
+    # into reasoning_content and `content` is clean. Prefer that field's absence
+    # as the signal it worked, and just return content.
+    reasoning = getattr(msg, "reasoning_content", None) or getattr(msg, "reasoning", None)
     text = getattr(msg, "content", None) or ""
     if not strip_reasoning or not text:
-        return text
+        return text.strip()
+
+    # If the parser already separated the trace, content is clean.
+    if reasoning:
+        return text.strip()
+
+    # Inlined trace. Handle three shapes the parser-less path produces:
+    #   1. balanced   <think> ... </think> { json }
+    #   2. close-only  ... </think> { json }   (opener consumed as a token)
+    #   3. no tags at all — truncated mid-trace, or a bare-prose preamble.
     text = _THINK_BLOCK.sub("", text)
-    # An unterminated opener means the trace ran to the token limit; if a closing
-    # tag exists, everything before it is reasoning.
-    if "</think" in text.lower() or "</reasoning" in text.lower():
-        text = _THINK_OPEN.sub("", text)
+    m = _THINK_CLOSE.search(text)
+    if m:
+        # Everything up to and including the last close tag is reasoning.
+        return text[m.end():].strip()
+
+    # Shape 3: no close tag. If a JSON object is present, the reasoning is the
+    # prose before it; _json_payload downstream will extract the object, so
+    # returning the whole string is safe. If there is no object, the trace was
+    # truncated before any answer — return as-is so the caller's parse fails
+    # loudly and the fallback fires, rather than silently emitting reasoning.
     return text.strip()
 
 
@@ -188,7 +210,7 @@ class OpenAIProvider:
         )
 
     async def generate_structured_output(
-        self, *, system: str, user: str, schema: Type[T], max_tokens: int = 3072
+        self, *, system: str, user: str, schema: Type[T], max_tokens: int = 512
     ) -> tuple[T, LLMResult]:
         # Force JSON; instruct the model that the schema is authoritative.
         sys = (
