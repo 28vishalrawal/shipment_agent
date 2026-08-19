@@ -59,7 +59,7 @@ class ReactAgent:
             try:
                 async def call():
                     return await self._provider.generate_with_tools(
-                        messages=messages, tools=tool_schemas, max_tokens=1024
+                        messages=messages, tools=tool_schemas, max_tokens=4096
                     )
 
                 result, _ = await with_retries(
