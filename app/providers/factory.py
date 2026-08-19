@@ -188,7 +188,7 @@ class OpenAIProvider:
         )
 
     async def generate_structured_output(
-        self, *, system: str, user: str, schema: Type[T], max_tokens: int = 512
+        self, *, system: str, user: str, schema: Type[T], max_tokens: int = 3072
     ) -> tuple[T, LLMResult]:
         # Force JSON; instruct the model that the schema is authoritative.
         sys = (
