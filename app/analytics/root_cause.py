@@ -11,6 +11,7 @@ correcting against the wrong M invalidates the false-discovery guarantee.
 from __future__ import annotations
 
 import itertools
+import logging
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -18,6 +19,8 @@ import pandas as pd
 from scipy import stats
 
 from app.core import column_mapping as cm
+
+logger = logging.getLogger("analytics.root_cause")
 from app.domain.models import (
     EvidenceGrade,
     GateResult,
@@ -108,6 +111,11 @@ def run_root_cause(
     cand = pd.DataFrame(rows)
     candidates_enumerated = len(cand)
 
+    logger.info(
+        "rootcause_start global_late_rate=%.4f dims=%s candidates_enumerated=%d",
+        G, dims, candidates_enumerated,
+    )
+
     rejected: list[RejectedCandidate] = []
 
     def reject(row, gate: str, reason: str) -> None:
@@ -127,6 +135,11 @@ def run_root_cause(
         reject(row, "gate0_support", f"n={row['n']} < {params.support_floor}")
     cand = cand[cand["n"] >= params.support_floor].reset_index(drop=True)
     m_tests = len(cand)  # M fixed here
+
+    logger.info(
+        "rootcause_gate0_support floor=%d survived=%d rejected=%d",
+        params.support_floor, m_tests, candidates_enumerated - m_tests,
+    )
 
     if m_tests == 0:
         return RootCauseOutput([], rejected, candidates_enumerated, 0, G)
@@ -181,6 +194,11 @@ def run_root_cause(
         reject(row, "gate2_effect", f"|lift-1|={abs(row['lift'] - 1):.3f} < {params.effect_size_min}")
     g2 = cand[passed_g2].copy()
 
+    logger.info(
+        "rootcause_gate2_effect min_lift_delta=%.2f survived=%d rejected=%d",
+        params.effect_size_min, len(g2), int((~passed_g2).sum()),
+    )
+
     # --- Gate 3: Benjamini-Hochberg FDR over M ---
     srt = g2.sort_values("p").reset_index(drop=True)
     srt["rank"] = np.arange(1, len(srt) + 1)
@@ -192,6 +210,11 @@ def run_root_cause(
     g3 = srt[srt["rank"] <= cut].copy()
     for _, row in srt[srt["rank"] > cut].iterrows():
         reject(row, "gate3_fdr", f"p={row['p']:.2e} > BH threshold (M={m_tests})")
+
+    logger.info(
+        "rootcause_gate3_fdr q=%.3f m_tests=%d survived=%d rejected=%d",
+        params.fdr_q, m_tests, len(g3), len(g2) - len(g3),
+    )
 
     # --- Gate 4: confound / all-parents ---
     def confound_ok(dset: tuple[str, ...], key: tuple, r: float) -> bool:
@@ -224,6 +247,11 @@ def run_root_cause(
         else:
             reject(row, "gate4_confound", "effect vanishes when conditioned on a parent")
     g4 = pd.DataFrame(g4_rows)
+
+    logger.info(
+        "rootcause_gate4_confound margin=%.2f survived=%d rejected=%d",
+        params.confound_margin, len(g4), len(g3) - len(g4),
+    )
 
     # --- Gate 5: temporal stability ---
     def stability(dset, key, base) -> tuple[float, bool, str]:
@@ -290,6 +318,16 @@ def run_root_cause(
 
     findings.sort(key=lambda f: abs(f.excess_orders) * f.confidence, reverse=True)
     protective.sort(key=lambda f: abs(f.excess_orders) * f.confidence, reverse=True)
+
+    logger.info(
+        "rootcause_gate5_stability var_max=%.2f entered=%d validated=%d protective=%d",
+        params.stability_var_max, len(g4), len(findings), len(protective),
+    )
+    logger.info(
+        "rootcause_done candidates=%d m_tests=%d validated=%d top=%s",
+        candidates_enumerated, m_tests, len(findings),
+        (findings[0].label if findings else None),
+    )
 
     return RootCauseOutput(
         findings=findings,

@@ -25,7 +25,9 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import itertools
 import logging
+import time
 from typing import Annotated, Any
 
 from pydantic import BaseModel
@@ -35,6 +37,10 @@ from app.mcp_server.datasets import DatasetError, get_cache
 from app.tools.base import Tool, ToolError, ToolRegistry
 
 logger = logging.getLogger("mcp.bridge")
+
+# Monotonic per-process counter so log lines can be read back in the exact
+# order the agent called tools, even when calls overlap.
+_call_seq = itertools.count(1)
 
 EXPOSURE_RULE = "requires_approval is False"
 
@@ -85,6 +91,15 @@ def _make_handler(tool: Tool, settings: Settings):
         dataset = kwargs.pop("dataset")
         cache = get_cache(settings)
 
+        # One id per call so the start line and finish line can be matched, and
+        # so overlapping calls stay distinguishable when read in order.
+        seq = next(_call_seq)
+        logger.info(
+            "mcp_tool_call seq=%d tool=%s dataset=%s args=%s",
+            seq, tool.name, dataset, dict(kwargs),
+        )
+        started = time.perf_counter()
+
         def run() -> Any:
             ctx = cache.get(settings, dataset)
             return tool.invoke(kwargs, ctx)
@@ -101,10 +116,28 @@ def _make_handler(tool: Tool, settings: Settings):
             # Surfaced as a normal result rather than an exception: the caller is
             # a model that can correct itself if told the name was wrong, but
             # only sees a generic failure if this raises.
-            logger.info("mcp_tool_rejected tool=%s reason=%s", tool.name, exc)
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.info(
+                "mcp_tool_rejected seq=%d tool=%s reason=%s elapsed_ms=%.1f",
+                seq, tool.name, exc, elapsed_ms,
+            )
             return {"error": str(exc), "tool": tool.name}
+        except Exception:
+            # An unexpected fault (not caller-correctable) would otherwise be
+            # swallowed into a generic MCP ToolError with no trace. Log it with
+            # the sequence id and full traceback, then re-raise unchanged.
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            logger.exception(
+                "mcp_tool_error seq=%d tool=%s elapsed_ms=%.1f",
+                seq, tool.name, elapsed_ms,
+            )
+            raise
 
-        logger.info("mcp_tool_ok tool=%s dataset=%s", tool.name, dataset)
+        elapsed_ms = (time.perf_counter() - started) * 1000
+        logger.info(
+            "mcp_tool_ok seq=%d tool=%s dataset=%s elapsed_ms=%.1f",
+            seq, tool.name, dataset, elapsed_ms,
+        )
         return {"dataset": dataset, "result": result}
 
     handler.__name__ = tool.name
